@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 train.py - Parallel matrix training for P2-ETF-SDF-ENGINE
-Includes retry logic for 409 conflicts when pushing to Hugging Face.
+Includes retry logic for 409 and 412 conflicts when pushing to Hugging Face.
 """
 
 import os
@@ -12,8 +12,7 @@ import numpy as np
 from datetime import datetime
 
 from datasets import load_dataset, Dataset
-from huggingface_hub import HfApi
-from huggingface_hub.errors import HfHubHTTPError  # Correct import
+from huggingface_hub.errors import HfHubHTTPError
 
 from configs import CONFIG
 from data_loader import DataLoader
@@ -46,20 +45,37 @@ def run_backtest_for_universe(assets, benchmark, start_date, end_date, lr, windo
     metrics = BacktestEngine.calculate_performance(strategy_returns, benchmark_aligned)
     return metrics
 
-def push_with_retry(dataset, dataset_name, token, max_retries=5, initial_delay=1):
-    """Push dataset to Hub with exponential backoff on 409 conflict."""
+def push_with_retry(result_record, dataset_name, token, max_retries=5, initial_delay=1):
+    """Push result to Hub with exponential backoff on 409/412 conflicts."""
     for attempt in range(max_retries):
         try:
-            dataset.push_to_hub(dataset_name, token=token, split="train")
+            # Always reload the latest existing dataset to avoid 412
+            try:
+                existing = load_dataset(dataset_name, split="train", token=token)
+                combined_df = pd.concat([existing.to_pandas(), pd.DataFrame([result_record])], ignore_index=True)
+                final_ds = Dataset.from_pandas(combined_df)
+            except Exception:
+                # First run: no existing dataset
+                final_ds = Dataset.from_pandas(pd.DataFrame([result_record]))
+
+            final_ds.push_to_hub(dataset_name, token=token, split="train")
             print(f"Successfully pushed to {dataset_name}")
             return True
+
         except HfHubHTTPError as e:
-            if e.response.status_code == 409 and "Another commit operation is in progress" in str(e):
+            # Retry on both 409 (concurrent commit) and 412 (branch updated)
+            if e.response.status_code in (409, 412):
                 wait_time = initial_delay * (2 ** attempt)
-                print(f"Conflict (409) on attempt {attempt+1}/{max_retries}. Waiting {wait_time}s...")
+                print(f"Conflict {e.response.status_code} on attempt {attempt+1}/{max_retries}. Waiting {wait_time}s...")
                 time.sleep(wait_time)
             else:
                 raise
+        except Exception as e:
+            # Catch any other exception and retry
+            wait_time = initial_delay * (2 ** attempt)
+            print(f"Unexpected error: {e}. Retry {attempt+1}/{max_retries} in {wait_time}s...")
+            time.sleep(wait_time)
+
     raise Exception(f"Failed to push after {max_retries} attempts due to persistent conflicts.")
 
 def main():
@@ -108,17 +124,7 @@ def main():
         "fi_total_return": fi_metrics["total_return"],
     }
 
-    # Create or append to dataset
-    results_df = pd.DataFrame([result_record])
-    
-    try:
-        existing = load_dataset(args.output, split="train", token=os.getenv("HF_TOKEN"))
-        combined_df = pd.concat([existing.to_pandas(), results_df], ignore_index=True)
-        final_ds = Dataset.from_pandas(combined_df)
-    except Exception:
-        final_ds = Dataset.from_pandas(results_df)
-
-    push_with_retry(final_ds, args.output, os.getenv("HF_TOKEN"))
+    push_with_retry(result_record, args.output, os.getenv("HF_TOKEN"))
     print("Training and upload complete.")
 
 if __name__ == "__main__":
