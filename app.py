@@ -396,13 +396,73 @@ def main():
     hf_token = get_hf_token()
     if not hf_token:
         st.error("HF_TOKEN not found. Please set your Hugging Face token to use this app.")
-        st.markdown("""
-        **For Streamlit Cloud:**
-        1. Go to your app settings
-        2. Add a secret named `HF_TOKEN` with your Hugging Face token
-        3. Restart the app
+        st.markdown(
+            "**For Streamlit Cloud:**\n"
+            "1. Go to your app settings\n"
+            "2. Add a secret named `HF_TOKEN` with your Hugging Face token\n"
+            "3. Restart the app\n\n"
+            "**For local development:**\n"
+            "```bash\n"
+            "export HF_TOKEN=\"your_token_here\"\n"
+            "streamlit run app.py\n"
+            "```\n\n"
+            "Get your token at: https://huggingface.co/settings/tokens"
+        )
+        st.stop()
+    
+    # Sidebar for settings
+    with st.sidebar:
+        st.header("Settings")
         
-        **For local development:**
-        ```bash
-        export HF_TOKEN="your_token_here"
-        streamlit run app.py
+        st.subheader("Model Parameters")
+        window_size = st.slider(
+            "Training Window (days)",
+            min_value=126,
+            max_value=504,
+            value=252,
+            step=21,
+            help="Number of days for training window"
+        )
+        
+        top_n = st.slider(
+            "Top ETFs to Select",
+            min_value=1,
+            max_value=5,
+            value=3,
+            help="Number of top ETFs to hold"
+        )
+        
+        st.divider()
+        
+        st.subheader("About")
+        st.markdown(
+            "**SDF Engine** uses a Sparse Dynamic Factor model to generate ETF trading signals.\n\n"
+            "- **PCA** for factor extraction\n"
+            "- **VARIMAX** for sparse rotation\n"
+            "- **VAR + Kalman** for forecasting\n"
+            "- **Cross-sectional scoring** for selection"
+        )
+        
+        st.divider()
+        
+        st.caption(f"Data: {CONFIG['huggingface']['dataset_source']}")
+        st.caption(f"Results: {CONFIG['huggingface']['dataset_results']}")
+        st.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    
+    # Main content with tabs
+    tab_names = [
+        CONFIG['streamlit']['tab_names']['equity'],
+        CONFIG['streamlit']['tab_names']['fi_commodities']
+    ]
+    
+    tabs = st.tabs(tab_names)
+    
+    with tabs[0]:
+        render_equity_tab()
+    
+    with tabs[1]:
+        render_fi_commodity_tab()
+
+
+if __name__ == "__main__":
+    main()
