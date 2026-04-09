@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 from typing import Dict, Tuple, Optional
 from datetime import datetime
+import warnings
 
 from data_loader import DataLoader
 from preprocessor import Preprocessor
@@ -44,6 +45,7 @@ class EquityEngine:
         self.forecaster_ = None
         self.reconstructor_ = None
         self.scorer_ = None
+        self.sparse_loadings_ = None
 
     def prepare_data(
         self,
@@ -92,16 +94,24 @@ class EquityEngine:
         factors = self.pca_.get_factors(train_returns.index)
 
         print(f"Equity: Extracted {self.pca_.optimal_k_} factors")
+        print(f"  Loadings shape: {self.pca_.loadings_.shape}")  # Should be (11, 5)
 
         # Step 2: Sparse Rotation
         self.rotator_ = SparseRotation(
             max_iter=CONFIG['sdf_model']['rotation']['max_iter']
         )
         self.rotator_.fit(self.pca_.loadings_)
+        
+        # Get rotated loadings and ensure correct shape
+        rotated_loadings = self.rotator_.get_rotated_loadings()
+        print(f"  Rotated loadings shape: {rotated_loadings.shape}")  # Should be (11, 5)
+        
+        # Create sparse mask
         self.sparse_loadings_ = SparseRotation.create_sparse_mask(
-            self.rotator_.rotated_loadings_,
+            rotated_loadings,
             top_n=3
         )
+        print(f"  Sparse loadings shape: {self.sparse_loadings_.shape}")  # Should be (11, 5)
 
         # Step 3: VAR Forecast
         self.forecaster_ = VARForecast(
