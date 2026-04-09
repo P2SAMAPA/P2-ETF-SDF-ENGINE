@@ -125,7 +125,6 @@ def get_last_training_date():
     try:
         ds = load_dataset(CONFIG['huggingface']['dataset_source'], split="train", token=token)
         df = ds.to_pandas()
-        # Try to find date column
         if 'date' in df.columns:
             df['date'] = pd.to_datetime(df['date'])
             latest = df['date'].max()
@@ -133,7 +132,6 @@ def get_last_training_date():
             df['date'] = pd.to_datetime(df['__index_level_0__'])
             latest = df['date'].max()
         else:
-            # Use index if it's datetime
             if isinstance(df.index, pd.DatetimeIndex):
                 latest = df.index.max()
             else:
@@ -147,14 +145,18 @@ def load_best_metrics():
     """Load best metrics from training results dataset."""
     token = get_hf_token()
     if not token:
+        st.warning("HF_TOKEN not found. Metrics unavailable.")
         return None
     try:
         ds = load_dataset(CONFIG['huggingface']['dataset_results'], split="train", token=token)
         df = ds.to_pandas()
         if len(df) == 0:
+            st.info("No training results yet. Run the training workflow first.")
             return None
-        best_row = df.loc[df['equity_sharpe'].idxmax()] if 'equity_sharpe' in df.columns else None
-        if best_row is not None:
+        # Find best sharpe ratio across all runs
+        if 'equity_sharpe' in df.columns:
+            best_idx = df['equity_sharpe'].idxmax()
+            best_row = df.loc[best_idx]
             return {
                 'equity_sharpe': best_row.get('equity_sharpe', 0),
                 'equity_annual_return': best_row.get('equity_annual_return', 0),
@@ -163,9 +165,12 @@ def load_best_metrics():
                 'fi_annual_return': best_row.get('fi_annual_return', 0),
                 'fi_max_drawdown': best_row.get('fi_max_drawdown', 0),
             }
-    except:
+        else:
+            st.info("Metrics columns not found in results dataset.")
+            return None
+    except Exception as e:
+        st.warning(f"Could not load metrics: {e}")
         return None
-    return None
 
 @st.cache_data(ttl=3600)
 def generate_equity_signals(window_size=252, top_n=3):
@@ -197,7 +202,7 @@ def generate_fi_commodity_signals(window_size=252, top_n=3):
     result = engine.generate_signals_pipeline(train_returns, train_macro, top_n)
     return result, engine
 
-def render_hero_card(selected_df, metrics, universe_name, benchmark_name):
+def render_hero_card(selected_df, metrics, universe_name, benchmark_name, next_date):
     """Render hero card with top positive ETF and secondary."""
     if selected_df is None or len(selected_df) == 0:
         st.warning("No positive expected returns available.")
@@ -219,7 +224,7 @@ def render_hero_card(selected_df, metrics, universe_name, benchmark_name):
         <div class="hero-card">
             <div class="hero-ticker">{top['asset']}</div>
             <div class="hero-return">+{top['expected_return']*100:.3f}%</div>
-            <div class="hero-label">Expected Return – Next Trading Day</div>
+            <div class="hero-label">Expected Return for {next_date}</div>
         </div>
         """, unsafe_allow_html=True)
         
@@ -232,7 +237,7 @@ def render_hero_card(selected_df, metrics, universe_name, benchmark_name):
             """, unsafe_allow_html=True)
     
     with col_metrics:
-        if metrics:
+        if metrics and metrics.get('annual_return') is not None:
             st.markdown(f"""
             <div class="metric-card">
                 <div class="metric-value">{metrics.get('annual_return', 0)*100:.1f}%</div>
@@ -265,7 +270,7 @@ def render_equity_tab(next_date, last_train_date):
             'max_drawdown': metrics_data['equity_max_drawdown'] if metrics_data else None,
         } if metrics_data else None
         
-        render_hero_card(result['signals'], equity_metrics, "Equity", "SPY")
+        render_hero_card(result['signals'], equity_metrics, "Equity", "SPY", next_date)
         
         st.markdown("---")
         st.subheader("📊 All ETF Rankings")
@@ -300,7 +305,7 @@ def render_fi_commodity_tab(next_date, last_train_date):
             'max_drawdown': metrics_data['fi_max_drawdown'] if metrics_data else None,
         } if metrics_data else None
         
-        render_hero_card(result['signals'], fi_metrics, "FI/Commodity", "AGG")
+        render_hero_card(result['signals'], fi_metrics, "FI/Commodity", "AGG", next_date)
         
         st.markdown("---")
         st.subheader("📊 All ETF Rankings")
