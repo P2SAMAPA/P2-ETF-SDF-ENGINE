@@ -42,6 +42,7 @@ class PCAExtractor:
         self.loadings_ = None
         self.factors_ = None
         self.explained_variance_ = None
+        self.factors_df_ = None
 
     def _compute_ic(
         self,
@@ -160,6 +161,13 @@ class PCAExtractor:
         self.factors_ = self.pca_.fit_transform(data)
         self.loadings_ = self.pca_.components_.T  # (N x k)
         self.explained_variance_ = self.pca_.explained_variance_ratio_
+        
+        # Store factors as DataFrame
+        self.factors_df_ = pd.DataFrame(
+            self.factors_,
+            index=returns.index,
+            columns=[f'F{i+1}' for i in range(self.factors_.shape[1])]
+        )
 
         return self
 
@@ -195,22 +203,25 @@ class PCAExtractor:
 
         return pd.DataFrame(
             self.loadings_,
-            index=self.factors_df_.index if hasattr(self, 'factors_df_') else None,
+            index=None,
             columns=[f'Factor_{i+1}' for i in range(self.loadings_.shape[1])]
         )
 
-    def get_factors(self, dates: pd.Index) -> pd.DataFrame:
+    def get_factors(self, dates: Optional[pd.Index] = None) -> pd.DataFrame:
         """
         Get factor time series.
 
         Args:
-            dates: Date index
+            dates: Date index (if None, use stored dates)
 
         Returns:
             DataFrame of factor values
         """
         if self.factors_ is None:
             raise ValueError("Model not fitted yet")
+
+        if dates is None:
+            dates = self.factors_df_.index if self.factors_df_ is not None else None
 
         return pd.DataFrame(
             self.factors_,
@@ -299,3 +310,8 @@ if __name__ == "__main__":
     print(f"Optimal k: {extractor.optimal_k_}")
     print(f"Explained variance: {extractor.explained_variance_}")
     print(f"Loadings shape: {extractor.loadings_.shape}")
+    print(f"Factors shape: {extractor.factors_.shape}")
+    
+    # Get factors as DataFrame
+    factors_df = extractor.get_factors(returns.index[:100])
+    print(f"Factors DataFrame shape: {factors_df.shape}")
