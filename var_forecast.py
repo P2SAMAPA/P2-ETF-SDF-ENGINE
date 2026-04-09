@@ -81,23 +81,52 @@ class VARForecast:
         else:
             self.data_ = factors.dropna()
 
-        # Fit VAR model
-        self.model_ = VAR(self.data_)
-
-        # Select optimal lag order if needed
-        try:
-            lag_order = self.model_.select_order(maxlags=self.lag_order * 2)
-            optimal_lag = lag_order.aic
-            self.lag_order_ = min(max(1, optimal_lag), self.lag_order)
-        except:
+        # Ensure we have enough data
+        if len(self.data_) < self.lag_order + 5:
+            warnings.warn(f"Insufficient data ({len(self.data_)} rows) for VAR with {self.lag_order} lags")
+            # Use simple autoregressive model instead
+            self.lag_order_ = max(1, len(self.data_) // 10)
+        else:
             self.lag_order_ = self.lag_order
 
-        self.results_ = self.model_.fit(maxlags=self.lag_order_, ic='aic')
-
-        print(f"VAR fitted with {self.lag_order_} lags")
-        print(f"AIC: {self.results_.aic:.4f}, BIC: {self.results_.bic:.4f}")
+        try:
+            # Fit VAR model
+            self.model_ = VAR(self.data_)
+            self.results_ = self.model_.fit(maxlags=self.lag_order_, ic='aic', trend='c')
+            print(f"VAR fitted with {self.results_.k_ar} lags")
+            print(f"AIC: {self.results_.aic:.4f}, BIC: {self.results_.bic:.4f}")
+        except (np.linalg.LinAlgError, ValueError) as e:
+            warnings.warn(f"VAR fitting failed: {e}. Using simple autoregressive model.")
+            self.results_ = None
+            # Fit simple AR model for each factor independently
+            self._fit_ar_models(factors)
 
         return self
+
+    def _fit_ar_models(self, factors: pd.DataFrame):
+        """
+        Fit simple AR models when VAR fails.
+        
+        Args:
+            factors: Factor time series
+        """
+        from statsmodels.tsa.ar_model import AutoReg
+        
+        self.ar_models_ = []
+        self.ar_coeffs_ = []
+        
+        for col in factors.columns:
+            try:
+                model = AutoReg(factors[col].dropna(), lags=min(2, len(factors) // 5))
+                result = model.fit()
+                self.ar_models_.append(result)
+                self.ar_coeffs_.append(result.params)
+            except:
+                # If AR fails, use mean forecast
+                self.ar_models_.append(None)
+                self.ar_coeffs_.append(np.array([factors[col].mean()]))
+        
+        print(f"Fitted AR models for {len(self.ar_models_)} factors")
 
     def forecast(
         self,
@@ -112,26 +141,27 @@ class VARForecast:
         Returns:
             Tuple of (forecasted factors, forecast covariance)
         """
-        if self.results_ is None:
-            raise ValueError("Model not fitted yet")
-
-        # Get last observations
-        y = self.data_.values[-self.lag_order_:]
-
-        # Forecast
-        forecast = self.results_.forecast(y, steps=steps)
-
-        # Get forecast variance
-        if hasattr(self.results_, 'forecast_cov'):
-            cov = self.results_.forecast_cov(steps=steps)
+        if self.results_ is not None:
+            # Get last observations
+            y = self.data_.values[-self.results_.k_ar:]
+            
+            # Forecast
+            forecast = self.results_.forecast(y, steps=steps)
+            
+            # Get number of factor columns (exclude macro)
+            n_factors = len([col for col in self.data_.columns if not col.startswith('macro_')])
+            return forecast[:, :n_factors], None
         else:
-            # Simple variance estimate
-            resid_var = self.results_.resid.cov()
-            cov = resid_var * np.eye(len(self.data_.columns))
-
-        # Return only factor columns (exclude macro if present)
-        n_factors = len([col for col in self.data_.columns if not col.startswith('macro_')])
-        return forecast[:, :n_factors], cov
+            # Use AR models for forecast
+            forecast = np.zeros((steps, len(self.ar_models_)))
+            for i, model in enumerate(self.ar_models_):
+                if model is not None:
+                    # Get last values
+                    last_vals = self.data_.iloc[-model.nobs:, i].values
+                    forecast[0, i] = model.forecast(steps=1)[0]
+                else:
+                    forecast[0, i] = self.ar_coeffs_[i][0]
+            return forecast, None
 
     def kalman_filter_state(
         self,
@@ -165,7 +195,14 @@ class VARForecast:
             H = obs_matrix
 
         # Estimate process and observation noise
-        Q = np.cov(factors.diff().dropna().T)  # Process noise
+        diff = factors.diff().dropna()
+        if len(diff) > 0:
+            Q = np.cov(diff.T)
+            # Ensure positive definite
+            Q = Q + np.eye(k) * 1e-6
+        else:
+            Q = np.eye(k) * 0.01
+            
         R = np.eye(k) * 0.01  # Observation noise (small)
 
         # Initialize state
@@ -190,7 +227,14 @@ class VARForecast:
                 y = factors.iloc[t].values
                 innovation = y - H @ x_pred
                 S = H @ P_pred @ H.T + R
-                K = P_pred @ H.T @ np.linalg.inv(S)
+                
+                # Add small regularization to ensure invertibility
+                S = S + np.eye(k) * 1e-8
+                
+                try:
+                    K = P_pred @ H.T @ np.linalg.inv(S)
+                except np.linalg.LinAlgError:
+                    K = np.zeros((k, k))
 
                 x = x_pred + K @ innovation
                 P = (np.eye(k) - K @ H) @ P_pred
@@ -225,7 +269,12 @@ class VARForecast:
 
         # Get state space model matrices
         A = np.eye(k)  # Transition matrix
-        Q = np.cov(factors.diff().dropna().T)
+        diff = factors.diff().dropna()
+        if len(diff) > 0:
+            Q = np.cov(diff.T)
+            Q = Q + np.eye(k) * 1e-6
+        else:
+            Q = np.eye(k) * 0.01
 
         # Smoother gains
         smoothed_states = np.zeros_like(states)
@@ -276,14 +325,18 @@ class VARForecast:
 
         # If using Kalman smoother, combine with observed data
         if self.use_kalman:
-            states, covariances = self.kalman_filter_state(factors)
+            try:
+                states, covariances = self.kalman_filter_state(factors)
 
-            if self.use_smoother:
-                states, covariances = self.kalman_smooth(factors, states, covariances)
+                if self.use_smoother:
+                    states, covariances = self.kalman_smooth(factors, states, covariances)
 
-            # Combine VAR forecast with smoothed state
-            last_smoothed = states[-1]
-            predicted_factors = 0.7 * var_forecast[0] + 0.3 * last_smoothed
+                # Combine VAR forecast with smoothed state
+                last_smoothed = states[-1]
+                predicted_factors = 0.7 * var_forecast[0] + 0.3 * last_smoothed
+            except Exception as e:
+                warnings.warn(f"Kalman filter failed: {e}. Using VAR forecast only.")
+                predicted_factors = var_forecast[0] if len(var_forecast) > 0 else var_forecast
         else:
             predicted_factors = var_forecast[0] if len(var_forecast) > 0 else var_forecast
 
