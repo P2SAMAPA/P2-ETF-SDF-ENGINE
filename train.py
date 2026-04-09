@@ -12,7 +12,8 @@ import numpy as np
 from datetime import datetime
 
 from datasets import load_dataset, Dataset
-from huggingface_hub import HfApi, HfHubHTTPError
+from huggingface_hub import HfApi
+from huggingface_hub.errors import HfHubHTTPError  # Correct import
 
 from configs import CONFIG
 from data_loader import DataLoader
@@ -54,7 +55,7 @@ def push_with_retry(dataset, dataset_name, token, max_retries=5, initial_delay=1
             return True
         except HfHubHTTPError as e:
             if e.response.status_code == 409 and "Another commit operation is in progress" in str(e):
-                wait_time = initial_delay * (2 ** attempt)  # exponential backoff
+                wait_time = initial_delay * (2 ** attempt)
                 print(f"Conflict (409) on attempt {attempt+1}/{max_retries}. Waiting {wait_time}s...")
                 time.sleep(wait_time)
             else:
@@ -110,7 +111,6 @@ def main():
     # Create or append to dataset
     results_df = pd.DataFrame([result_record])
     
-    # Try to load existing dataset, but if it fails (first run) just create new
     try:
         existing = load_dataset(args.output, split="train", token=os.getenv("HF_TOKEN"))
         combined_df = pd.concat([existing.to_pandas(), results_df], ignore_index=True)
@@ -118,7 +118,6 @@ def main():
     except Exception:
         final_ds = Dataset.from_pandas(results_df)
 
-    # Push with retry logic
     push_with_retry(final_ds, args.output, os.getenv("HF_TOKEN"))
     print("Training and upload complete.")
 
