@@ -7,13 +7,10 @@ import sys
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
-from datetime import datetime, timedelta
+from datetime import datetime
 import traceback
-import pytz
-from pandas.tseries.offsets import BDay
-from pandas.tseries.holiday import USFederalHolidayCalendar
 from pandas.tseries.offsets import CustomBusinessDay
+from pandas.tseries.holiday import USFederalHolidayCalendar
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -30,7 +27,7 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# Remove default sidebar padding and hide sidebar
+# Hide sidebar
 st.markdown("""
 <style>
     [data-testid="stSidebar"] {
@@ -91,12 +88,6 @@ st.markdown("""
         text-transform: uppercase;
         letter-spacing: 0.5px;
     }
-    .positive {
-        color: #2E7D32;
-    }
-    .negative {
-        color: #C62828;
-    }
     .footer {
         text-align: center;
         margin-top: 2rem;
@@ -118,21 +109,11 @@ def get_hf_token():
     return token
 
 def get_next_nyse_trading_date():
-    """Return next NYSE trading date."""
-    # US market holidays for 2024-2026 (simplified, but CustomBusinessDay can use calendar)
+    """Return next NYSE trading date as string YYYY-MM-DD."""
     us_cal = USFederalHolidayCalendar()
     nyse = CustomBusinessDay(calendar=us_cal)
     today = datetime.now().date()
     next_date = today + nyse
-    # If today is a trading day and market is open, next_date is tomorrow
-    # But we want the next trading day (if today is trading, use tomorrow; if today is weekend/holiday, use next business day)
-    # Check if today is a trading day
-    if pd.Timestamp(today).is_month_start:  # quick check; better to use custom calendar
-        pass
-    # Simple: just compute next business day using BDay which respects US holidays via calendar
-    from pandas.tseries.offsets import CustomBusinessDay
-    nyse_bday = CustomBusinessDay(calendar=USFederalHolidayCalendar())
-    next_date = today + nyse_bday
     return next_date.strftime('%Y-%m-%d')
 
 @st.cache_data(ttl=3600)
@@ -144,16 +125,20 @@ def get_last_training_date():
     try:
         ds = load_dataset(CONFIG['huggingface']['dataset_source'], split="train", token=token)
         df = ds.to_pandas()
+        # Try to find date column
         if 'date' in df.columns:
             df['date'] = pd.to_datetime(df['date'])
             latest = df['date'].max()
-            return latest.strftime('%d %b %Y')
         elif '__index_level_0__' in df.columns:
             df['date'] = pd.to_datetime(df['__index_level_0__'])
             latest = df['date'].max()
-            return latest.strftime('%d %b %Y')
         else:
-            return "Recent"
+            # Use index if it's datetime
+            if isinstance(df.index, pd.DatetimeIndex):
+                latest = df.index.max()
+            else:
+                return "Recent"
+        return latest.strftime('%d %b %Y')
     except:
         return "Recent"
 
@@ -168,7 +153,6 @@ def load_best_metrics():
         df = ds.to_pandas()
         if len(df) == 0:
             return None
-        # Find best sharpe ratio across all runs
         best_row = df.loc[df['equity_sharpe'].idxmax()] if 'equity_sharpe' in df.columns else None
         if best_row is not None:
             return {
@@ -291,7 +275,6 @@ def render_equity_tab(next_date, last_train_date):
         st.dataframe(scores_df[['asset', 'Expected Return (%)', 'Score']], 
                      use_container_width=True, hide_index=True)
         
-        # Footer with training date info
         st.markdown(f"""
         <div class="footer">
             Model trained on data updated till {last_train_date} | Next trading day: {next_date}
@@ -327,7 +310,6 @@ def render_fi_commodity_tab(next_date, last_train_date):
         st.dataframe(scores_df[['asset', 'Expected Return (%)', 'Score']], 
                      use_container_width=True, hide_index=True)
         
-        # Footer with training date info
         st.markdown(f"""
         <div class="footer">
             Model trained on data updated till {last_train_date} | Next trading day: {next_date}
@@ -341,11 +323,9 @@ def render_fi_commodity_tab(next_date, last_train_date):
 def main():
     st.title("SDF Engine – ETF Signal Generator")
     
-    # Get next NYSE trading date and last training date
     next_date = get_next_nyse_trading_date()
     last_train_date = get_last_training_date()
     
-    # Tabs
     tab1, tab2 = st.tabs(["📈 Equity ETFs", "🏦 FI & Commodities"])
     with tab1:
         render_equity_tab(next_date, last_train_date)
