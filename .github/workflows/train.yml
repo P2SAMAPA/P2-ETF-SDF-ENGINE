@@ -1,7 +1,7 @@
 name: Parallel Matrix Training (CPU)
 
 on:
-  workflow_dispatch:   # manual trigger only
+  workflow_dispatch:
 
 env:
   HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -12,11 +12,11 @@ jobs:
   train:
     runs-on: ubuntu-latest
     strategy:
-      max-parallel: 4          # free tier limit
+      max-parallel: 4
       matrix:
-        fold: [0, 1, 2, 3]     # 4-fold cross-validation
-        lr: [0.001, 0.01]      # learning rates
-        model: ["rf", "xgb"]   # model types
+        fold: [0, 1, 2, 3]
+        lr: [0.001, 0.01]
+        model: ["rf", "xgb"]
 
     steps:
       - name: Checkout code
@@ -51,7 +51,7 @@ jobs:
 
       - name: Login to Hugging Face
         run: |
-          huggingface-cli login --token ${{ env.HF_TOKEN }}
+          python -c "from huggingface_hub import login; login(token='${{ env.HF_TOKEN }}')"
 
       - name: Run training
         run: |
