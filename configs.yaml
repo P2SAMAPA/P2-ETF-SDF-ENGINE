@@ -27,8 +27,9 @@ universes:
       - XLY   # Consumer Discretionary Select Sector SPDR Fund
       - XLP   # Consumer Staples Select Sector SPDR Fund
       - XLU   # Utilities Select Sector SPDR Fund
-      - VNQ   # Vanguard Real Estate ETF
+      - XME   # SPDR S&P Metals and Mining ETF
       - IWM   # iShares Russell 2000 ETF
+      - GDX   # VanEck Gold Miners ETF
     benchmark: SPY  # SPDR S&P 500 ETF Trust (not in universe)
 
   fi_commodities:
@@ -40,8 +41,8 @@ universes:
       - VCIT  # Vanguard Intermediate-Term Corporate Bond ETF
       - LQD   # iShares iBoxx $ Investment Grade Corporate Bond ETF
       - HYG   # iShares iBoxx $ High Yield Corporate Bond ETF
-      - XME   # SPDR S&P Metals and Mining ETF
-      - GDX   # VanEck Gold Miners ETF
+      - VNQ   # Vanguard Real Estate ETF
+           
     benchmark: AGG  # iShares Core US Aggregate Bond ETF (not in universe)
 
 # Macro Indicators (exogenous inputs for VAR)
