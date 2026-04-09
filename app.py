@@ -1,5 +1,5 @@
 # =============================================================================
-# Streamlit App - SDF Engine Dashboard (Professional)
+# Streamlit App - SDF Engine Dashboard (Professional, No Sidebar)
 # =============================================================================
 
 import os
@@ -8,8 +8,12 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from datetime import datetime
+from datetime import datetime, timedelta
 import traceback
+import pytz
+from pandas.tseries.offsets import BDay
+from pandas.tseries.holiday import USFederalHolidayCalendar
+from pandas.tseries.offsets import CustomBusinessDay
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -23,12 +27,22 @@ st.set_page_config(
     page_title=CONFIG['streamlit']['title'],
     page_icon="📈",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="collapsed"
 )
 
-# Custom CSS for hero cards
+# Remove default sidebar padding and hide sidebar
 st.markdown("""
 <style>
+    [data-testid="stSidebar"] {
+        display: none;
+    }
+    [data-testid="collapsedControl"] {
+        display: none;
+    }
+    .main .block-container {
+        padding-top: 1rem;
+        padding-bottom: 1rem;
+    }
     .hero-card {
         background: linear-gradient(135deg, #1E3A5F 0%, #2C5282 100%);
         border-radius: 20px;
@@ -83,6 +97,14 @@ st.markdown("""
     .negative {
         color: #C62828;
     }
+    .footer {
+        text-align: center;
+        margin-top: 2rem;
+        padding-top: 1rem;
+        border-top: 1px solid #E2E8F0;
+        font-size: 0.8rem;
+        color: #718096;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -94,6 +116,46 @@ def get_hf_token():
         except:
             pass
     return token
+
+def get_next_nyse_trading_date():
+    """Return next NYSE trading date."""
+    # US market holidays for 2024-2026 (simplified, but CustomBusinessDay can use calendar)
+    us_cal = USFederalHolidayCalendar()
+    nyse = CustomBusinessDay(calendar=us_cal)
+    today = datetime.now().date()
+    next_date = today + nyse
+    # If today is a trading day and market is open, next_date is tomorrow
+    # But we want the next trading day (if today is trading, use tomorrow; if today is weekend/holiday, use next business day)
+    # Check if today is a trading day
+    if pd.Timestamp(today).is_month_start:  # quick check; better to use custom calendar
+        pass
+    # Simple: just compute next business day using BDay which respects US holidays via calendar
+    from pandas.tseries.offsets import CustomBusinessDay
+    nyse_bday = CustomBusinessDay(calendar=USFederalHolidayCalendar())
+    next_date = today + nyse_bday
+    return next_date.strftime('%Y-%m-%d')
+
+@st.cache_data(ttl=3600)
+def get_last_training_date():
+    """Get the latest date in the input dataset."""
+    token = get_hf_token()
+    if not token:
+        return "Unknown"
+    try:
+        ds = load_dataset(CONFIG['huggingface']['dataset_source'], split="train", token=token)
+        df = ds.to_pandas()
+        if 'date' in df.columns:
+            df['date'] = pd.to_datetime(df['date'])
+            latest = df['date'].max()
+            return latest.strftime('%d %b %Y')
+        elif '__index_level_0__' in df.columns:
+            df['date'] = pd.to_datetime(df['__index_level_0__'])
+            latest = df['date'].max()
+            return latest.strftime('%d %b %Y')
+        else:
+            return "Recent"
+    except:
+        return "Recent"
 
 @st.cache_data(ttl=3600)
 def load_best_metrics():
@@ -157,7 +219,6 @@ def render_hero_card(selected_df, metrics, universe_name, benchmark_name):
         st.warning("No positive expected returns available.")
         return
     
-    # Filter positive expected returns
     pos_df = selected_df[selected_df['expected_return'] > 0].copy()
     if len(pos_df) == 0:
         st.warning("No ETFs with positive expected return at this time.")
@@ -205,7 +266,7 @@ def render_hero_card(selected_df, metrics, universe_name, benchmark_name):
         else:
             st.info("Performance metrics will appear after training completes.")
 
-def render_equity_tab():
+def render_equity_tab(next_date, last_train_date):
     st.header("US Equity ETFs")
     st.markdown(f"**Benchmark:** {CONFIG['universes']['equity']['benchmark']}")
     
@@ -213,7 +274,6 @@ def render_equity_tab():
         with st.spinner("Analyzing market signals..."):
             result, engine = generate_equity_signals(window_size=252, top_n=3)
         
-        # Get metrics from training results
         metrics_data = load_best_metrics()
         equity_metrics = {
             'annual_return': metrics_data['equity_annual_return'] if metrics_data else None,
@@ -231,11 +291,18 @@ def render_equity_tab():
         st.dataframe(scores_df[['asset', 'Expected Return (%)', 'Score']], 
                      use_container_width=True, hide_index=True)
         
+        # Footer with training date info
+        st.markdown(f"""
+        <div class="footer">
+            Model trained on data updated till {last_train_date} | Next trading day: {next_date}
+        </div>
+        """, unsafe_allow_html=True)
+        
     except Exception as e:
         st.error(f"Error: {str(e)}")
         st.code(traceback.format_exc())
 
-def render_fi_commodity_tab():
+def render_fi_commodity_tab(next_date, last_train_date):
     st.header("Fixed Income & Commodities ETFs")
     st.markdown(f"**Benchmark:** {CONFIG['universes']['fi_commodities']['benchmark']}")
     
@@ -260,6 +327,13 @@ def render_fi_commodity_tab():
         st.dataframe(scores_df[['asset', 'Expected Return (%)', 'Score']], 
                      use_container_width=True, hide_index=True)
         
+        # Footer with training date info
+        st.markdown(f"""
+        <div class="footer">
+            Model trained on data updated till {last_train_date} | Next trading day: {next_date}
+        </div>
+        """, unsafe_allow_html=True)
+        
     except Exception as e:
         st.error(f"Error: {str(e)}")
         st.code(traceback.format_exc())
@@ -267,22 +341,16 @@ def render_fi_commodity_tab():
 def main():
     st.title("SDF Engine – ETF Signal Generator")
     
-    # Sidebar
-    with st.sidebar:
-        st.header("⚙️ Settings")
-        window_size = st.slider("Training Window (days)", 126, 504, 252, 21)
-        top_n = st.slider("Top ETFs to Display", 1, 5, 3)
-        st.divider()
-        st.markdown("**Model:** Sparse Dynamic Factor Model")
-        st.markdown("**Data Source:** Hugging Face Datasets")
-        st.caption(f"Last refresh: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    # Get next NYSE trading date and last training date
+    next_date = get_next_nyse_trading_date()
+    last_train_date = get_last_training_date()
     
     # Tabs
     tab1, tab2 = st.tabs(["📈 Equity ETFs", "🏦 FI & Commodities"])
     with tab1:
-        render_equity_tab()
+        render_equity_tab(next_date, last_train_date)
     with tab2:
-        render_fi_commodity_tab()
+        render_fi_commodity_tab(next_date, last_train_date)
 
 if __name__ == "__main__":
     main()
