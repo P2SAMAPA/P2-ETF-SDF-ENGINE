@@ -46,6 +46,7 @@ class EquityEngine:
         self.reconstructor_ = None
         self.scorer_ = None
         self.sparse_loadings_ = None
+        self.train_returns_index_ = None  # Store the index from training
 
     def prepare_data(
         self,
@@ -84,6 +85,9 @@ class EquityEngine:
         Returns:
             Self
         """
+        # Store the index for later use
+        self.train_returns_index_ = train_returns.index
+        
         # Step 1: PCA Factor Extraction
         self.pca_ = PCAExtractor(
             min_factors=CONFIG['sdf_model']['pca']['min_factors'],
@@ -94,7 +98,7 @@ class EquityEngine:
         factors = self.pca_.get_factors(train_returns.index)
 
         print(f"Equity: Extracted {self.pca_.optimal_k_} factors")
-        print(f"  Loadings shape: {self.pca_.loadings_.shape}")  # Should be (11, 5)
+        print(f"  Loadings shape: {self.pca_.loadings_.shape}")
 
         # Step 2: Sparse Rotation
         self.rotator_ = SparseRotation(
@@ -104,14 +108,14 @@ class EquityEngine:
         
         # Get rotated loadings and ensure correct shape
         rotated_loadings = self.rotator_.get_rotated_loadings()
-        print(f"  Rotated loadings shape: {rotated_loadings.shape}")  # Should be (11, 5)
+        print(f"  Rotated loadings shape: {rotated_loadings.shape}")
         
         # Create sparse mask
         self.sparse_loadings_ = SparseRotation.create_sparse_mask(
             rotated_loadings,
             top_n=3
         )
-        print(f"  Sparse loadings shape: {self.sparse_loadings_.shape}")  # Should be (11, 5)
+        print(f"  Sparse loadings shape: {self.sparse_loadings_.shape}")
 
         # Step 3: VAR Forecast
         self.forecaster_ = VARForecast(
@@ -151,8 +155,8 @@ class EquityEngine:
         if self.pca_ is None:
             raise ValueError("Model not fitted. Call fit() first.")
 
-        # Get last factors from PCA
-        factors = self.pca_.get_factors(self.pca_.factors_)
+        # Get factors as DataFrame with proper index
+        factors = self.pca_.get_factors(self.train_returns_index_)
 
         # Forecast factors
         forecasted_factors = self.forecaster_.predict_factors(
