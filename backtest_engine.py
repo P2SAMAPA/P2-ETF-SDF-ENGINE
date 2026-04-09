@@ -1,16 +1,10 @@
 # =============================================================================
-# Backtest Engine Module - Walk-Forward Testing with 3 Window Strategies
+# Backtest Engine Module - Walk-Forward Testing with Rolling Window
 # =============================================================================
-"""
-Performs walk-forward backtesting using three window strategies:
-A) Rolling Window - Fixed size, slides forward
-B) Shrinking Window - Starts large, exponentially decays
-C) Expanding Window - Grows from start, never shrinks
-"""
 
 import numpy as np
 import pandas as pd
-from typing import Dict, Tuple, Optional, Callable
+from typing import Dict, Tuple, Optional
 from dataclasses import dataclass
 import warnings
 
@@ -65,12 +59,10 @@ class BacktestEngine:
 
         # Load data
         self.loader = DataLoader(hf_token=hf_token)
+        self.preprocessor = Preprocessor()  # For filling missing values
         self.raw_data = self.loader.load_raw_data()
 
-        # Preprocessor
-        self.preprocessor = Preprocessor()
-
-        # Store processed data
+        # Processed data will be stored
         self.returns_ = None
         self.macro_ = None
         self.benchmark_returns_ = None
@@ -127,15 +119,19 @@ class BacktestEngine:
             Dictionary with results
         """
         try:
+            # ----- FILL MISSING VALUES -----
+            train_returns_filled = self.preprocessor.fill_missing_values(train_returns)
+            train_macro_filled = self.preprocessor.fill_missing_values(train_macro)
+
             # Step 1: Extract factors with PCA
             pca = PCAExtractor(
                 min_factors=CONFIG['sdf_model']['pca']['min_factors'],
                 max_factors=CONFIG['sdf_model']['pca']['max_factors'],
                 standardize=True
             )
-            pca.fit(train_returns)
+            pca.fit(train_returns_filled)
 
-            factors = pca.get_factors(train_returns.index)
+            factors = pca.get_factors(train_returns_filled.index)
 
             # Step 2: Sparse rotation
             rotator = SparseRotation(max_iter=CONFIG['sdf_model']['rotation']['max_iter'])
@@ -150,22 +146,22 @@ class BacktestEngine:
                 lag_order=CONFIG['sdf_model']['var']['lag_order'],
                 use_kalman=CONFIG['sdf_model']['var']['use_kalman']
             )
-            forecasted_factors = forecaster.predict_factors(factors, train_macro, horizon=1)
+            forecasted_factors = forecaster.predict_factors(factors, train_macro_filled, horizon=1)
 
             # Step 4: Reconstruct returns
             reconstructor = ReturnReconstructor(
                 residual_penalty=config.residual_penalty,
                 top_loadings_per_factor=3
             )
-            reconstructor.fit(train_returns, factors, sparse_loadings)
-            forecasted_returns, residual_std = reconstructor.reconstruct(forecasted_factors)
+            reconstructor.fit(train_returns_filled, factors, sparse_loadings)
+            forecasted_returns, _ = reconstructor.reconstruct(forecasted_factors)
 
             # Step 5: Score and rank
             scorer = CrossSectionalScorer(
                 factor_exposure_weight=config.factor_exposure_weight,
                 residual_vol_penalty=config.residual_penalty
             )
-            scorer.fit(self.assets, factors.columns.tolist(), sparse_loadings, residual_std)
+            scorer.fit(self.assets, factors.columns.tolist(), sparse_loadings, reconstructor.residual_std_)
             scores = scorer.compute_scores(forecasted_returns, forecasted_factors)
             selected = scorer.select_top_n(scores, config.top_n)
 
@@ -198,7 +194,6 @@ class BacktestEngine:
         start_date: str,
         end_date: str,
         window_size: int = 252,
-        rebalance_freq: str = 'daily',
         top_n: int = 3
     ) -> pd.DataFrame:
         """
@@ -208,7 +203,6 @@ class BacktestEngine:
             start_date: Backtest start date
             end_date: Backtest end date
             window_size: Rolling window size
-            rebalance_freq: Rebalancing frequency
             top_n: Number of top ETFs to hold
 
         Returns:
@@ -223,7 +217,7 @@ class BacktestEngine:
             window_type='rolling',
             window_size=window_size,
             top_n=top_n,
-            rebalance_frequency=rebalance_freq
+            rebalance_frequency='daily'
         )
 
         results = []
@@ -243,166 +237,6 @@ class BacktestEngine:
             results.append(result)
 
         return pd.DataFrame(results)
-
-    def run_shrinking_window(
-        self,
-        start_date: str,
-        end_date: str,
-        initial_size: int = 504,
-        decay_factor: float = 0.99,
-        min_size: int = 126,
-        rebalance_freq: str = 'daily',
-        top_n: int = 3
-    ) -> pd.DataFrame:
-        """
-        Run shrinking window backtest.
-
-        Window starts at initial_size and shrinks exponentially.
-
-        Args:
-            start_date: Backtest start date
-            end_date: Backtest end date
-            initial_size: Initial window size
-            decay_factor: Exponential decay factor
-            min_size: Minimum window size
-            rebalance_freq: Rebalancing frequency
-            top_n: Number of top ETFs to hold
-
-        Returns:
-            DataFrame with backtest results
-        """
-        self.prepare_data(start_date, end_date)
-
-        results = []
-        dates = self.returns_.index[initial_size:]
-        current_window = initial_size
-
-        for i, date in enumerate(dates):
-            if i % 50 == 0:
-                print(f"Shrinking: Processing {date.date()} window={current_window:.0f}")
-
-            # Update window size with decay
-            current_window = max(min_size, current_window * decay_factor)
-
-            config = BacktestConfig(
-                start_date=start_date,
-                end_date=end_date,
-                window_type='shrinking',
-                window_size=int(current_window),
-                top_n=top_n
-            )
-
-            train_returns = self.returns_.iloc[i:i + int(current_window)]
-            train_macro = self.macro_.loc[train_returns.index]
-            test_returns = self.returns_.iloc[i + int(current_window)]
-
-            result = self._run_single_period(
-                train_returns, train_macro, test_returns, config
-            )
-            result['window_size'] = current_window
-            results.append(result)
-
-        return pd.DataFrame(results)
-
-    def run_expanding_window(
-        self,
-        start_date: str,
-        end_date: str,
-        min_size: int = 126,
-        initial_gap: int = 252,
-        rebalance_freq: str = 'daily',
-        top_n: int = 3
-    ) -> pd.DataFrame:
-        """
-        Run expanding window backtest.
-
-        Window starts at min_size and grows to include all history.
-
-        Args:
-            start_date: Backtest start date
-            end_date: Backtest end date
-            min_size: Minimum starting window
-            initial_gap: Initial skip for burn-in
-            rebalance_freq: Rebalancing frequency
-            top_n: Number of top ETFs to hold
-
-        Returns:
-            DataFrame with backtest results
-        """
-        self.prepare_data(start_date, end_date)
-
-        results = []
-        dates = self.returns_.index[initial_gap:]
-
-        for i, date in enumerate(dates):
-            if i % 50 == 0:
-                print(f"Expanding: Processing {date.date()} (obs={i + initial_gap})")
-
-            # Window grows: from 0 to current index
-            window_end = i + initial_gap
-
-            config = BacktestConfig(
-                start_date=start_date,
-                end_date=end_date,
-                window_type='expanding',
-                window_size=window_end,
-                top_n=top_n
-            )
-
-            train_returns = self.returns_.iloc[:window_end]
-            train_macro = self.macro_.loc[train_returns.index]
-            test_returns = self.returns_.iloc[window_end]
-
-            result = self._run_single_period(
-                train_returns, train_macro, test_returns, config
-            )
-            result['window_size'] = window_end
-            results.append(result)
-
-        return pd.DataFrame(results)
-
-    def run_all_strategies(
-        self,
-        start_date: str,
-        end_date: str,
-        **kwargs
-    ) -> Dict[str, pd.DataFrame]:
-        """
-        Run all three window strategies.
-
-        Args:
-            start_date: Backtest start date
-            end_date: Backtest end date
-            **kwargs: Additional arguments for individual strategies
-
-        Returns:
-            Dictionary with results for each strategy
-        """
-        results = {}
-
-        # Rolling
-        print("\n=== Running Rolling Window ===")
-        results['rolling'] = self.run_rolling_window(
-            start_date, end_date,
-            window_size=kwargs.get('window_size', 252)
-        )
-
-        # Shrinking
-        print("\n=== Running Shrinking Window ===")
-        results['shrinking'] = self.run_shrinking_window(
-            start_date, end_date,
-            initial_size=kwargs.get('initial_size', 504),
-            decay_factor=kwargs.get('decay_factor', 0.99)
-        )
-
-        # Expanding
-        print("\n=== Running Expanding Window ===")
-        results['expanding'] = self.run_expanding_window(
-            start_date, end_date,
-            initial_gap=kwargs.get('initial_gap', 252)
-        )
-
-        return results
 
     @staticmethod
     def calculate_performance(
@@ -424,16 +258,28 @@ class BacktestEngine:
         returns = returns.loc[common_idx]
         benchmark = benchmark_returns.loc[common_idx]
 
+        if len(returns) == 0:
+            return {
+                'total_return': np.nan,
+                'annual_return': np.nan,
+                'volatility': np.nan,
+                'sharpe_ratio': np.nan,
+                'max_drawdown': np.nan,
+                'win_rate': np.nan,
+                'total_trades': 0
+            }
+
         # Cumulative returns
         cum_returns = (1 + returns).cumprod()
         cum_benchmark = (1 + benchmark).cumprod()
 
         # Metrics
         total_return = cum_returns.iloc[-1] - 1
-        annual_return = (1 + total_return) ** (252 / len(returns)) - 1
+        years = len(returns) / 252
+        annual_return = (1 + total_return) ** (1 / years) - 1 if years > 0 else 0
 
         volatility = returns.std() * np.sqrt(252)
-        sharpe = annual_return / volatility if volatility > 0 else 0
+        sharpe = annual_return / (volatility + 1e-8)  # add small epsilon to avoid division by zero
 
         # Max drawdown
         rolling_max = cum_returns.cummax()
