@@ -1,11 +1,7 @@
 name: Parallel Matrix Training (CPU)
 
 on:
-  push:
-    branches: [ main, master ]
-  pull_request:
-    branches: [ main, master ]
-  workflow_dispatch:
+  workflow_dispatch:   # manual trigger only
 
 env:
   HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -16,12 +12,11 @@ jobs:
   train:
     runs-on: ubuntu-latest
     strategy:
-      max-parallel: 4                # free tier limit
+      max-parallel: 4          # free tier limit
       matrix:
-        # Replace these axes with your actual hyperparameters
-        fold: [0, 1, 2, 3]           # 4-fold cross-validation
-        lr: [0.001, 0.01]            # learning rates
-        model: ['rf', 'xgb']         # model type
+        fold: [0, 1, 2, 3]     # 4-fold cross-validation
+        lr: [0.001, 0.01]      # learning rates
+        model: ["rf", "xgb"]   # model types
 
     steps:
       - name: Checkout code
@@ -51,14 +46,14 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install datasets huggingface_hub pandas scikit-learn xgboost
+          pip install datasets huggingface_hub pandas numpy scikit-learn statsmodels plotly streamlit pyyaml
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
       - name: Login to Hugging Face
         run: |
           huggingface-cli login --token ${{ env.HF_TOKEN }}
 
-      - name: Run training job
+      - name: Run training
         run: |
           python train.py \
             --input ${{ env.INPUT_DATASET }} \
@@ -66,10 +61,3 @@ jobs:
             --fold ${{ matrix.fold }} \
             --lr ${{ matrix.lr }} \
             --model ${{ matrix.model }}
-
-      - name: Upload local artifacts (optional)
-        uses: actions/upload-artifact@v4
-        with:
-          name: results-${{ matrix.fold }}-${{ matrix.model }}-lr${{ matrix.lr }}
-          path: ./results/
-          if-no-files-found: warn
