@@ -57,26 +57,26 @@ class SparseRotation:
             old_rotation = rotation.copy()
 
             # Current rotated loadings
-            L = loadings @ rotation
+            L = loadings @ rotation  # shape: (n, k)
 
-            # Compute the varimax criterion gradient
-            # d(L_kj^2) / d(rotation_mj)
-            L_sq = L ** 2
+            # Compute the varimax criterion
+            L_sq = L ** 2  # shape: (n, k)
+            
+            # For VARIMAX, we want to maximize sum of variances of squared loadings
+            # The gradient computation is corrected below
+            
+            # Compute column sums of squared loadings
+            col_sum_sq = np.sum(L_sq, axis=0)  # shape: (k,)
+            
+            # Compute the gradient matrix M
+            # M = loadings^T * (L_sq - (1/n) * diag(col_sum_sq))
+            diag_matrix = np.diag(col_sum_sq / n)
+            gradient = loadings.T @ (L_sq - diag_matrix)  # shape: (k, k)
 
-            # Diagonal term
-            diag = np.diag(L_sq.T @ L_sq)
-
-            # Off-diagonal term
-            off_diag = L_sq.T @ L
-
-            # Update rotation matrix
-            numerator = loadings.T @ (L_sq - self.gamma / n * diag)
-            denominator = loadings.T @ off_diag
-
-            # Solve using SVD for orthogonal rotation
+            # Solve using SVD for orthogonal rotation (Procrustes)
             try:
-                U, S, Vt = svd(numerator @ np.linalg.inv(denominator + 1e-10))
-                rotation = Vt.T @ U.T
+                U, S, Vt = svd(gradient)
+                rotation = U @ Vt
             except np.linalg.LinAlgError:
                 warnings.warn("SVD convergence issue in VARIMAX")
                 break
@@ -90,7 +90,6 @@ class SparseRotation:
             print(f"VARIMAX did not converge in {self.max_iter} iterations")
 
         rotated = loadings @ rotation
-
         return rotated, rotation
 
     def fit(self, loadings: np.ndarray) -> 'SparseRotation':
