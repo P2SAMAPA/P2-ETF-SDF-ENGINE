@@ -54,7 +54,7 @@ class Preprocessor:
             raise ValueError(f"Unknown fill method: {self.fill_method}")
 
         # Fill any remaining NaN (e.g., at start of series)
-        result = result.fillna(method='ffill').fillna(method='bfill')
+        result = result.ffill().bfill()
 
         final_missing = result.isnull().sum().sum()
         if final_missing > 0:
