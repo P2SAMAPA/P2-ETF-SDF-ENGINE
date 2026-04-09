@@ -62,14 +62,10 @@ class SparseRotation:
             # Compute the varimax criterion
             L_sq = L ** 2  # shape: (n, k)
             
-            # For VARIMAX, we want to maximize sum of variances of squared loadings
-            # The gradient computation is corrected below
-            
             # Compute column sums of squared loadings
             col_sum_sq = np.sum(L_sq, axis=0)  # shape: (k,)
             
             # Create matrix where each column j has col_sum_sq[j] / n repeated n times
-            # This is the broadcasting fix: reshape to (1, k) so it broadcasts correctly
             mean_sq = (col_sum_sq / n).reshape(1, k)  # shape: (1, k)
             
             # Subtract mean from each column (broadcasting works: (n, k) - (1, k))
@@ -95,7 +91,8 @@ class SparseRotation:
         else:
             print(f"VARIMAX did not converge in {self.max_iter} iterations")
 
-        rotated = loadings @ rotation
+        # Rotated loadings should have same shape as input (n, k)
+        rotated = loadings @ rotation  # shape: (n, k)
         return rotated, rotation
 
     def fit(self, loadings: np.ndarray) -> 'SparseRotation':
@@ -108,7 +105,9 @@ class SparseRotation:
         Returns:
             Self
         """
-        self.rotation_matrix_, self.rotated_loadings_ = self._varimax(loadings)
+        self.rotated_loadings_, self.rotation_matrix_ = self._varimax(loadings)
+        print(f"  fit() - rotated_loadings shape: {self.rotated_loadings_.shape}")
+        print(f"  fit() - rotation_matrix shape: {self.rotation_matrix_.shape}")
         return self
 
     def transform(self, loadings: np.ndarray) -> np.ndarray:
@@ -243,6 +242,7 @@ if __name__ == "__main__":
     np.random.seed(42)
     loadings = np.random.randn(10, 4) * 0.5
 
+    print(f"Original loadings shape: {loadings.shape}")
     print("Original loadings:")
     print(loadings[:5, :3])
 
@@ -250,7 +250,8 @@ if __name__ == "__main__":
     rotator = SparseRotation(max_iter=100)
     rotator.fit(loadings)
 
-    print("\nRotated loadings:")
+    print(f"\nRotated loadings shape: {rotator.rotated_loadings_.shape}")
+    print("Rotated loadings:")
     print(rotator.rotated_loadings_[:5, :3])
 
     # Create sparse version
@@ -259,5 +260,6 @@ if __name__ == "__main__":
         top_n=3
     )
 
-    print("\nSparse loadings:")
+    print(f"\nSparse loadings shape: {sparse_loadings.shape}")
+    print("Sparse loadings:")
     print(sparse_loadings[:5, :3])
