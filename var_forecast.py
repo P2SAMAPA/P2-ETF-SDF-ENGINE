@@ -47,6 +47,7 @@ class VARForecast:
         self.model_ = None
         self.results_ = None
         self.kalman_filter_ = None
+        self.data_ = None
 
     def fit(
         self,
@@ -70,8 +71,12 @@ class VARForecast:
 
         # Combine factors with macro if provided
         if self.include_macro and macro is not None:
+            # Rename macro columns to avoid overlap with factor columns
+            macro_renamed = macro.copy()
+            macro_renamed.columns = [f'macro_{col}' for col in macro.columns]
+            
             # Align indices
-            combined = factors.join(macro, how='inner')
+            combined = factors.join(macro_renamed, how='inner')
             self.data_ = combined.dropna()
         else:
             self.data_ = factors.dropna()
@@ -122,9 +127,11 @@ class VARForecast:
         else:
             # Simple variance estimate
             resid_var = self.results_.resid.cov()
-            cov = resid_var * np.eye(len(factors.columns) + (macro.shape[1] if macro is not None else 0))
+            cov = resid_var * np.eye(len(self.data_.columns))
 
-        return forecast[:, :self.results_.k_ar], cov
+        # Return only factor columns (exclude macro if present)
+        n_factors = len([col for col in self.data_.columns if not col.startswith('macro_')])
+        return forecast[:, :n_factors], cov
 
     def kalman_filter_state(
         self,
@@ -276,9 +283,9 @@ class VARForecast:
 
             # Combine VAR forecast with smoothed state
             last_smoothed = states[-1]
-            predicted_factors = 0.7 * var_forecast + 0.3 * last_smoothed
+            predicted_factors = 0.7 * var_forecast[0] + 0.3 * last_smoothed
         else:
-            predicted_factors = var_forecast
+            predicted_factors = var_forecast[0] if len(var_forecast) > 0 else var_forecast
 
         return predicted_factors
 
@@ -300,6 +307,11 @@ def estimate_var_coefficients(
     if not STATSMODELS_AVAILABLE:
         raise ImportError("statsmodels required")
 
+    # Rename macro columns to avoid overlap
+    if macro is not None:
+        macro = macro.copy()
+        macro.columns = [f'macro_{col}' for col in macro.columns]
+    
     model = VAR(factors.join(macro, how='inner') if macro is not None else factors)
     results = model.fit(maxlags=2)
 
@@ -337,3 +349,4 @@ if __name__ == "__main__":
     predicted = forecaster.predict_factors(factors, macro, horizon=1)
 
     print(f"\nPredicted factors: {predicted}")
+    print(f"Predicted factors shape: {predicted.shape}")
