@@ -1,0 +1,75 @@
+name: Parallel Matrix Training (CPU)
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+env:
+  HF_TOKEN: ${{ secrets.HF_TOKEN }}
+  INPUT_DATASET: "P2SAMAPA/fi-etf-macro-signal-master-data"
+  OUTPUT_DATASET: "P2SAMAPA/p2-etf-sdf-engine-results"
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    strategy:
+      max-parallel: 4                # free tier limit
+      matrix:
+        # Replace these axes with your actual hyperparameters
+        fold: [0, 1, 2, 3]           # 4-fold cross-validation
+        lr: [0.001, 0.01]            # learning rates
+        model: ['rf', 'xgb']         # model type
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Cache pip packages
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Cache Hugging Face datasets
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/huggingface/datasets
+          key: ${{ runner.os }}-hf-datasets-${{ env.INPUT_DATASET }}
+          restore-keys: |
+            ${{ runner.os }}-hf-datasets-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install datasets huggingface_hub pandas scikit-learn xgboost
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Login to Hugging Face
+        run: |
+          huggingface-cli login --token ${{ env.HF_TOKEN }}
+
+      - name: Run training job
+        run: |
+          python train.py \
+            --input ${{ env.INPUT_DATASET }} \
+            --output ${{ env.OUTPUT_DATASET }} \
+            --fold ${{ matrix.fold }} \
+            --lr ${{ matrix.lr }} \
+            --model ${{ matrix.model }}
+
+      - name: Upload local artifacts (optional)
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-${{ matrix.fold }}-${{ matrix.model }}-lr${{ matrix.lr }}
+          path: ./results/
+          if-no-files-found: warn
