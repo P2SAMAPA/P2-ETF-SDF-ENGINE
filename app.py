@@ -1,92 +1,92 @@
 # =============================================================================
-# Streamlit App - SDF Engine Dashboard
+# Streamlit App - SDF Engine Dashboard (Professional)
 # =============================================================================
-"""
-Streamlit application for displaying SDF Engine signals.
-Two tabs: Equity ETFs and FI/Commodities ETFs
-"""
 
 import os
 import sys
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.express as px
 import plotly.graph_objects as go
-from datetime import datetime, timedelta
+from datetime import datetime
 import traceback
 
-# Add current directory to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from configs import CONFIG
 from data_loader import DataLoader
 from equity_engine import EquityEngine
 from fi_commodity_engine import FICommodityEngine
-from backtest_engine import BacktestEngine
+from datasets import load_dataset
 
-# Page configuration
 st.set_page_config(
     page_title=CONFIG['streamlit']['title'],
     page_icon="📈",
     layout="wide",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="expanded"
 )
 
-# Custom CSS for large fonts and white background
+# Custom CSS for hero cards
 st.markdown("""
 <style>
-    /* Main background - white/light shade */
-    .stApp {
-        background-color: #FFFFFF;
+    .hero-card {
+        background: linear-gradient(135deg, #1E3A5F 0%, #2C5282 100%);
+        border-radius: 20px;
+        padding: 2rem;
+        color: white;
+        margin-bottom: 1rem;
+        box-shadow: 0 10px 25px rgba(0,0,0,0.1);
     }
-
-    /* Large font size for hero tabs */
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 24px;
+    .hero-ticker {
+        font-size: 3rem;
+        font-weight: 800;
+        letter-spacing: -0.02em;
     }
-    .stTabs [data-baseweb="tab"] {
-        font-size: 20px;
+    .hero-return {
+        font-size: 2rem;
         font-weight: 600;
-        padding: 16px 32px;
+        margin-top: 0.5rem;
     }
-
-    /* Headers */
-    h1 {
-        font-size: 2.5rem !important;
-        color: #1E3A5F !important;
+    .hero-label {
+        font-size: 0.9rem;
+        opacity: 0.8;
+        margin-top: 0.25rem;
     }
-    h2 {
-        font-size: 1.8rem !important;
-        color: #1E3A5F !important;
-    }
-    h3 {
-        font-size: 1.4rem !important;
-        color: #2C5282 !important;
-    }
-
-    /* Cards */
-    .metric-card {
+    .secondary-card {
         background-color: #F7FAFC;
-        border-radius: 10px;
-        padding: 20px;
-        border-left: 4px solid #1E3A5F;
+        border-radius: 16px;
+        padding: 1rem;
+        margin-top: 1rem;
+        border-left: 4px solid #2C5282;
     }
-
-    /* Selected ETF highlight */
-    .selected-etf {
-        background-color: #EBF8FF;
-        border: 2px solid #3182CE;
-        border-radius: 8px;
-        padding: 12px;
-        margin: 8px 0;
+    .metric-card {
+        background-color: white;
+        border-radius: 12px;
+        padding: 1rem;
+        text-align: center;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+    }
+    .metric-value {
+        font-size: 1.8rem;
+        font-weight: 700;
+        color: #1E3A5F;
+    }
+    .metric-label {
+        font-size: 0.8rem;
+        color: #4A5568;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+    .positive {
+        color: #2E7D32;
+    }
+    .negative {
+        color: #C62828;
     }
 </style>
 """, unsafe_allow_html=True)
 
-
 def get_hf_token():
-    """Get HF token from environment or Streamlit secrets."""
     token = os.getenv('HF_TOKEN')
     if not token:
         try:
@@ -95,374 +95,194 @@ def get_hf_token():
             pass
     return token
 
-
 @st.cache_data(ttl=3600)
-def load_data_universe():
-    """Load data for both universes."""
-    hf_token = get_hf_token()
-    if not hf_token:
-        st.error("HF_TOKEN not found. Please set it in secrets or environment.")
+def load_best_metrics():
+    """Load best metrics from training results dataset."""
+    token = get_hf_token()
+    if not token:
         return None
-    
-    loader = DataLoader(hf_token=hf_token)
-    raw_data = loader.load_raw_data()
-    return raw_data
-
+    try:
+        ds = load_dataset(CONFIG['huggingface']['dataset_results'], split="train", token=token)
+        df = ds.to_pandas()
+        if len(df) == 0:
+            return None
+        # Find best sharpe ratio across all runs
+        best_row = df.loc[df['equity_sharpe'].idxmax()] if 'equity_sharpe' in df.columns else None
+        if best_row is not None:
+            return {
+                'equity_sharpe': best_row.get('equity_sharpe', 0),
+                'equity_annual_return': best_row.get('equity_annual_return', 0),
+                'equity_max_drawdown': best_row.get('equity_max_drawdown', 0),
+                'fi_sharpe': best_row.get('fi_sharpe', 0),
+                'fi_annual_return': best_row.get('fi_annual_return', 0),
+                'fi_max_drawdown': best_row.get('fi_max_drawdown', 0),
+            }
+    except:
+        return None
+    return None
 
 @st.cache_data(ttl=3600)
 def generate_equity_signals(window_size=252, top_n=3):
-    """Generate equity signals."""
     hf_token = get_hf_token()
     if not hf_token:
         raise ValueError("HF_TOKEN not set")
-    
     engine = EquityEngine(hf_token=hf_token)
-    
-    # Get latest data
     end_date = datetime.now().strftime('%Y-%m-%d')
-    returns, macro, _ = engine.prepare_data(
-        start_date='2020-01-01',
-        end_date=end_date
-    )
-    
-    # Ensure we have enough data
+    returns, macro, _ = engine.prepare_data(start_date='2020-01-01', end_date=end_date)
     if len(returns) < window_size:
-        raise ValueError(f"Insufficient data: only {len(returns)} rows, need {window_size}")
-    
-    # Use most recent window
+        raise ValueError(f"Insufficient data: {len(returns)} rows")
     train_returns = returns.iloc[-window_size:]
     train_macro = macro.loc[train_returns.index]
-    
-    # Generate signals
     result = engine.generate_signals_pipeline(train_returns, train_macro, top_n)
-    
     return result, engine
-
 
 @st.cache_data(ttl=3600)
 def generate_fi_commodity_signals(window_size=252, top_n=3):
-    """Generate FI/Commodity signals."""
     hf_token = get_hf_token()
     if not hf_token:
         raise ValueError("HF_TOKEN not set")
-    
     engine = FICommodityEngine(hf_token=hf_token)
-    
-    # Get latest data
     end_date = datetime.now().strftime('%Y-%m-%d')
-    returns, macro, _ = engine.prepare_data(
-        start_date='2020-01-01',
-        end_date=end_date
-    )
-    
-    # Ensure we have enough data
+    returns, macro, _ = engine.prepare_data(start_date='2020-01-01', end_date=end_date)
     if len(returns) < window_size:
-        raise ValueError(f"Insufficient data: only {len(returns)} rows, need {window_size}")
-    
-    # Use most recent window
+        raise ValueError(f"Insufficient data: {len(returns)} rows")
     train_returns = returns.iloc[-window_size:]
     train_macro = macro.loc[train_returns.index]
-    
-    # Generate signals
     result = engine.generate_signals_pipeline(train_returns, train_macro, top_n)
-    
     return result, engine
 
-
-def plot_factor_interpretations(factor_df):
-    """Plot factor interpretations as a heatmap."""
-    if factor_df is None or len(factor_df) == 0:
-        return None
+def render_hero_card(selected_df, metrics, universe_name, benchmark_name):
+    """Render hero card with top positive ETF and secondary."""
+    if selected_df is None or len(selected_df) == 0:
+        st.warning("No positive expected returns available.")
+        return
     
-    try:
-        # Try to extract actual loadings if available
-        if 'loadings' in factor_df.columns:
-            # Use actual loadings data
-            loadings_data = np.array(factor_df['loadings'].tolist())
-            fig = px.imshow(
-                loadings_data,
-                title='Factor Loadings Heatmap',
-                labels=dict(x="Factors", y="Assets", color="Loading"),
-                color_continuous_scale='RdBu'
-            )
-        else:
-            # Create sample heatmap data for visualization
-            n_factors = len(factor_df)
-            n_assets = min(8, len(CONFIG['universes']['equity']['assets']))
-            
-            np.random.seed(42)
-            data = np.random.randn(n_factors, n_assets) * 0.5
-            
-            assets = CONFIG['universes']['equity']['assets'][:n_assets]
-            factors = [f'Factor {i+1}' for i in range(n_factors)]
-            
-            fig = px.imshow(
-                data,
-                x=assets,
-                y=factors,
-                color_continuous_scale='RdBu',
-                title='Factor Loadings Heatmap (Illustrative)',
-                labels=dict(x="Assets", y="Factors", color="Loading")
-            )
+    # Filter positive expected returns
+    pos_df = selected_df[selected_df['expected_return'] > 0].copy()
+    if len(pos_df) == 0:
+        st.warning("No ETFs with positive expected return at this time.")
+        return
+    
+    pos_df = pos_df.sort_values('expected_return', ascending=False)
+    top = pos_df.iloc[0]
+    secondary = pos_df.iloc[1] if len(pos_df) > 1 else None
+    
+    col_hero, col_metrics = st.columns([2, 1])
+    
+    with col_hero:
+        st.markdown(f"""
+        <div class="hero-card">
+            <div class="hero-ticker">{top['asset']}</div>
+            <div class="hero-return">+{top['expected_return']*100:.3f}%</div>
+            <div class="hero-label">Expected Return – Next Trading Day</div>
+        </div>
+        """, unsafe_allow_html=True)
         
-        fig.update_layout(template='plotly_white', height=400)
-        return fig
-    except Exception as e:
-        st.warning(f"Could not create heatmap: {e}")
-        return None
-
+        if secondary is not None:
+            st.markdown(f"""
+            <div class="secondary-card">
+                <strong>📈 {secondary['asset']}</strong><br>
+                Expected Return: +{secondary['expected_return']*100:.3f}%
+            </div>
+            """, unsafe_allow_html=True)
+    
+    with col_metrics:
+        if metrics:
+            st.markdown(f"""
+            <div class="metric-card">
+                <div class="metric-value">{metrics.get('annual_return', 0)*100:.1f}%</div>
+                <div class="metric-label">Annualized Return</div>
+            </div>
+            <div class="metric-card" style="margin-top: 12px;">
+                <div class="metric-value">{metrics.get('sharpe', 0):.2f}</div>
+                <div class="metric-label">Sharpe Ratio</div>
+            </div>
+            <div class="metric-card" style="margin-top: 12px;">
+                <div class="metric-value">{-metrics.get('max_drawdown', 0)*100:.1f}%</div>
+                <div class="metric-label">Max Drawdown</div>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.info("Performance metrics will appear after training completes.")
 
 def render_equity_tab():
-    """Render Equity ETFs tab."""
     st.header("US Equity ETFs")
     st.markdown(f"**Benchmark:** {CONFIG['universes']['equity']['benchmark']}")
-    st.markdown(f"**Universe:** {', '.join(CONFIG['universes']['equity']['assets'])}")
-    
-    col1, col2, col3, col4 = st.columns(4)
     
     try:
-        # Get signals
-        with st.spinner('Generating equity signals... This may take a minute...'):
+        with st.spinner("Analyzing market signals..."):
             result, engine = generate_equity_signals(window_size=252, top_n=3)
         
-        # Display metrics
-        with col1:
-            date_str = result['date'].strftime('%Y-%m-%d') if hasattr(result['date'], 'strftime') else str(result['date'])
-            st.metric("Date", date_str)
+        # Get metrics from training results
+        metrics_data = load_best_metrics()
+        equity_metrics = {
+            'annual_return': metrics_data['equity_annual_return'] if metrics_data else None,
+            'sharpe': metrics_data['equity_sharpe'] if metrics_data else None,
+            'max_drawdown': metrics_data['equity_max_drawdown'] if metrics_data else None,
+        } if metrics_data else None
         
-        with col2:
-            st.metric("Factors", result['n_factors'])
+        render_hero_card(result['signals'], equity_metrics, "Equity", "SPY")
         
-        with col3:
-            explained = np.mean(result['explained_variance']) * 100
-            st.metric("Explained Var.", f"{explained:.1f}%")
-        
-        with col4:
-            st.metric("Selected ETFs", len(result['selected_assets']))
-        
-        st.divider()
-        
-        # Selected ETFs
-        st.subheader("Selected ETFs (Top 3)")
-        
-        selected = result['signals']
-        if len(selected) > 0:
-            for _, row in selected.iterrows():
-                with st.container():
-                    st.markdown(f"""
-                    <div class="selected-etf">
-                        <h4>{row['asset']}</h4>
-                        <p>Expected Return: {row['expected_return']*100:.4f}% |
-                           Composite Score: {row['composite_score']:.4f}</p>
-                    </div>
-                    """, unsafe_allow_html=True)
-        else:
-            st.warning("No ETFs selected")
-        
-        st.divider()
-        
-        # All ETF Scores
-        st.subheader("All ETF Rankings")
-        
+        st.markdown("---")
+        st.subheader("📊 All ETF Rankings")
         scores_df = result['signals'].copy()
         scores_df['Expected Return (%)'] = scores_df['expected_return'] * 100
         scores_df['Score'] = scores_df['composite_score'].round(4)
+        st.dataframe(scores_df[['asset', 'Expected Return (%)', 'Score']], 
+                     use_container_width=True, hide_index=True)
         
-        display_cols = ['asset', 'Expected Return (%)', 'Score']
-        st.dataframe(
-            scores_df[display_cols],
-            use_container_width=True,
-            hide_index=True
-        )
-        
-        st.divider()
-        
-        # Factor Interpretations
-        st.subheader("Factor Interpretations")
-        
-        factor_df = result['factor_interpretations']
-        if len(factor_df) > 0:
-            st.dataframe(
-                factor_df[['factor', 'top_assets', 'interpretation']],
-                use_container_width=True,
-                hide_index=True
-            )
-            
-            fig = plot_factor_interpretations(factor_df)
-            if fig:
-                st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("No factor interpretations available")
-            
     except Exception as e:
-        st.error(f"Error generating signals: {str(e)}")
+        st.error(f"Error: {str(e)}")
         st.code(traceback.format_exc())
-        st.info("Make sure HF_TOKEN is set in your environment or Streamlit secrets.")
-
 
 def render_fi_commodity_tab():
-    """Render FI/Commodities tab."""
     st.header("Fixed Income & Commodities ETFs")
     st.markdown(f"**Benchmark:** {CONFIG['universes']['fi_commodities']['benchmark']}")
-    st.markdown(f"**Universe:** {', '.join(CONFIG['universes']['fi_commodities']['assets'])}")
-    
-    col1, col2, col3, col4 = st.columns(4)
     
     try:
-        # Get signals
-        with st.spinner('Generating FI/Commodity signals... This may take a minute...'):
+        with st.spinner("Analyzing market signals..."):
             result, engine = generate_fi_commodity_signals(window_size=252, top_n=3)
         
-        # Display metrics
-        with col1:
-            date_str = result['date'].strftime('%Y-%m-%d') if hasattr(result['date'], 'strftime') else str(result['date'])
-            st.metric("Date", date_str)
+        metrics_data = load_best_metrics()
+        fi_metrics = {
+            'annual_return': metrics_data['fi_annual_return'] if metrics_data else None,
+            'sharpe': metrics_data['fi_sharpe'] if metrics_data else None,
+            'max_drawdown': metrics_data['fi_max_drawdown'] if metrics_data else None,
+        } if metrics_data else None
         
-        with col2:
-            st.metric("Factors", result['n_factors'])
+        render_hero_card(result['signals'], fi_metrics, "FI/Commodity", "AGG")
         
-        with col3:
-            explained = np.mean(result['explained_variance']) * 100
-            st.metric("Explained Var.", f"{explained:.1f}%")
-        
-        with col4:
-            st.metric("Selected ETFs", len(result['selected_assets']))
-        
-        st.divider()
-        
-        # Selected ETFs
-        st.subheader("Selected ETFs (Top 3)")
-        
-        selected = result['signals']
-        if len(selected) > 0:
-            for _, row in selected.iterrows():
-                with st.container():
-                    st.markdown(f"""
-                    <div class="selected-etf">
-                        <h4>{row['asset']}</h4>
-                        <p>Expected Return: {row['expected_return']*100:.4f}% |
-                           Composite Score: {row['composite_score']:.4f}</p>
-                    </div>
-                    """, unsafe_allow_html=True)
-        else:
-            st.warning("No ETFs selected")
-        
-        st.divider()
-        
-        # All ETF Scores
-        st.subheader("All ETF Rankings")
-        
+        st.markdown("---")
+        st.subheader("📊 All ETF Rankings")
         scores_df = result['signals'].copy()
         scores_df['Expected Return (%)'] = scores_df['expected_return'] * 100
         scores_df['Score'] = scores_df['composite_score'].round(4)
+        st.dataframe(scores_df[['asset', 'Expected Return (%)', 'Score']], 
+                     use_container_width=True, hide_index=True)
         
-        display_cols = ['asset', 'Expected Return (%)', 'Score']
-        st.dataframe(
-            scores_df[display_cols],
-            use_container_width=True,
-            hide_index=True
-        )
-        
-        st.divider()
-        
-        # Factor Interpretations
-        st.subheader("Factor Interpretations")
-        
-        factor_df = result['factor_interpretations']
-        if len(factor_df) > 0:
-            st.dataframe(
-                factor_df[['factor', 'top_assets', 'interpretation']],
-                use_container_width=True,
-                hide_index=True
-            )
-            
-            fig = plot_factor_interpretations(factor_df)
-            if fig:
-                st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("No factor interpretations available")
-            
     except Exception as e:
-        st.error(f"Error generating signals: {str(e)}")
+        st.error(f"Error: {str(e)}")
         st.code(traceback.format_exc())
-        st.info("Make sure HF_TOKEN is set in your environment or Streamlit secrets.")
-
 
 def main():
-    """Main application."""
-    st.title(CONFIG['streamlit']['title'])
+    st.title("SDF Engine – ETF Signal Generator")
     
-    # Check for HF_TOKEN at startup
-    hf_token = get_hf_token()
-    if not hf_token:
-        st.error("HF_TOKEN not found. Please set your Hugging Face token to use this app.")
-        st.markdown(
-            "**For Streamlit Cloud:**\n"
-            "1. Go to your app settings\n"
-            "2. Add a secret named `HF_TOKEN` with your Hugging Face token\n"
-            "3. Restart the app\n\n"
-            "**For local development:**\n"
-            "```bash\n"
-            "export HF_TOKEN=\"your_token_here\"\n"
-            "streamlit run app.py\n"
-            "```\n\n"
-            "Get your token at: https://huggingface.co/settings/tokens"
-        )
-        st.stop()
-    
-    # Sidebar for settings
+    # Sidebar
     with st.sidebar:
-        st.header("Settings")
-        
-        st.subheader("Model Parameters")
-        window_size = st.slider(
-            "Training Window (days)",
-            min_value=126,
-            max_value=504,
-            value=252,
-            step=21,
-            help="Number of days for training window"
-        )
-        
-        top_n = st.slider(
-            "Top ETFs to Select",
-            min_value=1,
-            max_value=5,
-            value=3,
-            help="Number of top ETFs to hold"
-        )
-        
+        st.header("⚙️ Settings")
+        window_size = st.slider("Training Window (days)", 126, 504, 252, 21)
+        top_n = st.slider("Top ETFs to Display", 1, 5, 3)
         st.divider()
-        
-        st.subheader("About")
-        st.markdown(
-            "**SDF Engine** uses a Sparse Dynamic Factor model to generate ETF trading signals.\n\n"
-            "- **PCA** for factor extraction\n"
-            "- **VARIMAX** for sparse rotation\n"
-            "- **VAR + Kalman** for forecasting\n"
-            "- **Cross-sectional scoring** for selection"
-        )
-        
-        st.divider()
-        
-        st.caption(f"Data: {CONFIG['huggingface']['dataset_source']}")
-        st.caption(f"Results: {CONFIG['huggingface']['dataset_results']}")
-        st.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+        st.markdown("**Model:** Sparse Dynamic Factor Model")
+        st.markdown("**Data Source:** Hugging Face Datasets")
+        st.caption(f"Last refresh: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     
-    # Main content with tabs
-    tab_names = [
-        CONFIG['streamlit']['tab_names']['equity'],
-        CONFIG['streamlit']['tab_names']['fi_commodities']
-    ]
-    
-    tabs = st.tabs(tab_names)
-    
-    with tabs[0]:
+    # Tabs
+    tab1, tab2 = st.tabs(["📈 Equity ETFs", "🏦 FI & Commodities"])
+    with tab1:
         render_equity_tab()
-    
-    with tabs[1]:
+    with tab2:
         render_fi_commodity_tab()
-
 
 if __name__ == "__main__":
     main()
