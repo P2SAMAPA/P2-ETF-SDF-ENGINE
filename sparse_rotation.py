@@ -68,10 +68,16 @@ class SparseRotation:
             # Compute column sums of squared loadings
             col_sum_sq = np.sum(L_sq, axis=0)  # shape: (k,)
             
+            # Create matrix where each column j has col_sum_sq[j] / n repeated n times
+            # This is the broadcasting fix: reshape to (1, k) so it broadcasts correctly
+            mean_sq = (col_sum_sq / n).reshape(1, k)  # shape: (1, k)
+            
+            # Subtract mean from each column (broadcasting works: (n, k) - (1, k))
+            centered = L_sq - mean_sq  # shape: (n, k)
+            
             # Compute the gradient matrix M
-            # M = loadings^T * (L_sq - (1/n) * diag(col_sum_sq))
-            diag_matrix = np.diag(col_sum_sq / n)
-            gradient = loadings.T @ (L_sq - diag_matrix)  # shape: (k, k)
+            # M = loadings^T * centered
+            gradient = loadings.T @ centered  # shape: (k, k)
 
             # Solve using SVD for orthogonal rotation (Procrustes)
             try:
