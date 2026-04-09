@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
 train.py - Parallel matrix training with backtest metrics
-Runs rolling window backtest over the full date range from config,
-calculates performance metrics, and saves results to HF dataset.
+Saves separate datasets for equity and FI/commodities.
 """
 
 import os
@@ -12,7 +11,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 
-from datasets import load_dataset, Dataset
+from datasets import Dataset
 from huggingface_hub.errors import HfHubHTTPError
 
 from configs import CONFIG
@@ -20,135 +19,135 @@ from backtest_engine import BacktestEngine
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input", type=str, required=True,
-                        help="HF dataset name for input data")
-    parser.add_argument("--output", type=str, required=True,
-                        help="HF dataset name for results")
-    parser.add_argument("--fold", type=int, required=True,
-                        help="Fold index (used as random seed)")
-    parser.add_argument("--lr", type=float, required=True,
-                        help="Learning rate -> residual_penalty and factor_exposure_weight")
+    parser.add_argument("--fold", type=int, required=True)
+    parser.add_argument("--lr", type=float, required=True)
     parser.add_argument("--model", type=str, required=True,
-                        choices=["rf", "xgb", "elasticnet"],
-                        help="Model type (stored for reference)")
+                        choices=["rf", "xgb", "elasticnet"])
     return parser.parse_args()
 
 def override_config(lr: float):
-    """Map learning rate to model parameters."""
     CONFIG['sdf_model']['signal']['residual_vol_penalty'] = lr
-    CONFIG['sdf_model']['signal']['factor_exposure_weight'] = lr * 3  # adjust as needed
+    CONFIG['sdf_model']['signal']['factor_exposure_weight'] = lr * 3
 
-def run_backtest_for_universe(assets, benchmark, start_date, end_date, lr, window_size, top_n):
-    """
-    Run rolling window backtest for a given universe.
-    Returns (metrics_dict, final_signals_df)
-    """
+def safe_metrics(strategy_returns, benchmark_returns):
+    """Compute metrics with safety checks to avoid inf/nan."""
+    if len(strategy_returns) == 0:
+        return {k: np.nan for k in ['sharpe_ratio', 'annual_return', 'volatility',
+                                     'max_drawdown', 'win_rate', 'total_return']}
+    # Align
+    common = strategy_returns.index.intersection(benchmark_returns.index)
+    r = strategy_returns.loc[common]
+    b = benchmark_returns.loc[common]
+    if len(r) == 0:
+        return {k: np.nan for k in ['sharpe_ratio', 'annual_return', 'volatility',
+                                     'max_drawdown', 'win_rate', 'total_return']}
+    # Total return
+    total_return = (1 + r).prod() - 1
+    # Annualized return (252 trading days)
+    years = len(r) / 252
+    annual_return = (1 + total_return) ** (1 / years) - 1 if years > 0 else 0
+    # Volatility
+    volatility = r.std() * np.sqrt(252)
+    # Sharpe (add epsilon to avoid division by zero)
+    sharpe = annual_return / (volatility + 1e-8)
+    # Max drawdown
+    cum = (1 + r).cumprod()
+    rolling_max = cum.cummax()
+    drawdown = (cum - rolling_max) / rolling_max
+    max_drawdown = drawdown.min()
+    # Win rate
+    win_rate = (r > 0).mean()
+    return {
+        'sharpe_ratio': sharpe,
+        'annual_return': annual_return,
+        'volatility': volatility,
+        'max_drawdown': max_drawdown,
+        'win_rate': win_rate,
+        'total_return': total_return,
+    }
+
+def run_backtest_for_universe(assets, benchmark, start_date, end_date, window_size, top_n):
     engine = BacktestEngine(assets, benchmark, hf_token=os.getenv("HF_TOKEN"))
-    
-    # Run rolling window backtest
-    results_df = engine.run_rolling_window(
-        start_date=start_date,
-        end_date=end_date,
-        window_size=window_size,
-        top_n=top_n
-    )
-    
-    # Get benchmark returns for the same period
+    results_df = engine.run_rolling_window(start_date, end_date, window_size, top_n)
     _, _, benchmark_returns = engine.prepare_data(start_date, end_date)
-    
-    # Align dates
-    strategy_returns = results_df.set_index('date')['strategy_return']
-    common_idx = strategy_returns.index.intersection(benchmark_returns.index)
-    strategy_returns = strategy_returns.loc[common_idx]
-    benchmark_aligned = benchmark_returns.loc[common_idx]
-    
-    # Calculate metrics
-    metrics = BacktestEngine.calculate_performance(strategy_returns, benchmark_aligned)
-    
-    # Get final prediction (last row of results_df)
+    strat_returns = results_df.set_index('date')['strategy_return']
+    metrics = safe_metrics(strat_returns, benchmark_returns)
     final_signals = results_df.iloc[-1] if len(results_df) > 0 else None
-    
     return metrics, final_signals
 
-def push_with_retry(dataset, dataset_name, token, max_retries=5):
-    for attempt in range(max_retries):
+def push_with_retry(dataset, dataset_name, token):
+    for attempt in range(5):
         try:
             dataset.push_to_hub(dataset_name, token=token, split="train")
-            print(f"Successfully pushed to {dataset_name}")
-            return True
+            print(f"Pushed to {dataset_name}")
+            return
         except HfHubHTTPError as e:
             if e.response.status_code in (409, 412):
-                wait = 2 ** attempt
-                print(f"Conflict {e.response.status_code}, retrying in {wait}s...")
-                time.sleep(wait)
+                time.sleep(2 ** attempt)
             else:
                 raise
-    raise Exception("Failed after retries")
+    raise Exception("Failed to push after 5 attempts")
 
 def main():
     args = parse_args()
     override_config(args.lr)
-    np.random.seed(args.fold)   # for reproducibility
-    
-    # Get date range from config
+    np.random.seed(args.fold)
+
     start_date = CONFIG['backtest']['start_date']
     end_date   = CONFIG['backtest']['end_date']
     window_size = CONFIG['backtest']['window_strategies']['rolling']['window_size']
     top_n = CONFIG['backtest']['rebalance']['top_n']
-    
-    print(f"Running backtest from {start_date} to {end_date} with window={window_size}, top_n={top_n}")
-    
-    # ----- Equity Universe -----
+
+    # Equity
     eq_assets = CONFIG['universes']['equity']['assets']
     eq_bench = CONFIG['universes']['equity']['benchmark']
-    eq_metrics, eq_final = run_backtest_for_universe(
-        eq_assets, eq_bench, start_date, end_date, args.lr, window_size, top_n
-    )
-    
-    # ----- FI/Commodity Universe -----
+    eq_metrics, eq_final = run_backtest_for_universe(eq_assets, eq_bench, start_date, end_date, window_size, top_n)
+
+    # FI/Commodity
     fi_assets = CONFIG['universes']['fi_commodities']['assets']
     fi_bench = CONFIG['universes']['fi_commodities']['benchmark']
-    fi_metrics, fi_final = run_backtest_for_universe(
-        fi_assets, fi_bench, start_date, end_date, args.lr, window_size, top_n
-    )
-    
-    # Prepare result record (metrics + final predictions)
-    result_record = {
-        "fold": args.fold,
-        "learning_rate": args.lr,
-        "model_type": args.model,
+    fi_metrics, fi_final = run_backtest_for_universe(fi_assets, fi_bench, start_date, end_date, window_size, top_n)
+
+    # Prepare records
+    equity_record = {
+        "fold": args.fold, "learning_rate": args.lr, "model_type": args.model,
         "timestamp": datetime.now().isoformat(),
         "date": eq_final['date'].strftime('%Y-%m-%d') if eq_final is not None else None,
-        # Equity metrics
-        "equity_sharpe": eq_metrics.get("sharpe_ratio", np.nan),
-        "equity_annual_return": eq_metrics.get("annual_return", np.nan),
-        "equity_volatility": eq_metrics.get("volatility", np.nan),
-        "equity_max_drawdown": eq_metrics.get("max_drawdown", np.nan),
-        "equity_win_rate": eq_metrics.get("win_rate", np.nan),
-        "equity_total_return": eq_metrics.get("total_return", np.nan),
-        # FI metrics
-        "fi_sharpe": fi_metrics.get("sharpe_ratio", np.nan),
-        "fi_annual_return": fi_metrics.get("annual_return", np.nan),
-        "fi_volatility": fi_metrics.get("volatility", np.nan),
-        "fi_max_drawdown": fi_metrics.get("max_drawdown", np.nan),
-        "fi_win_rate": fi_metrics.get("win_rate", np.nan),
-        "fi_total_return": fi_metrics.get("total_return", np.nan),
-        # Final predictions (top ETFs)
-        "equity_top_etfs": eq_final['selected_assets'] if eq_final is not None else [],
-        "fi_top_etfs": fi_final['selected_assets'] if fi_final is not None else [],
+        "sharpe_ratio": eq_metrics['sharpe_ratio'],
+        "annual_return": eq_metrics['annual_return'],
+        "volatility": eq_metrics['volatility'],
+        "max_drawdown": eq_metrics['max_drawdown'],
+        "win_rate": eq_metrics['win_rate'],
+        "total_return": eq_metrics['total_return'],
+        "top_etfs": eq_final['selected_assets'] if eq_final is not None else [],
+        "forecasted_returns": eq_final['forecasted_returns'] if eq_final is not None else {},
+        "scores": eq_final['scores'] if eq_final is not None else {},
     }
-    
-    # Load existing dataset or create new
+
+    fi_record = {
+        "fold": args.fold, "learning_rate": args.lr, "model_type": args.model,
+        "timestamp": datetime.now().isoformat(),
+        "date": fi_final['date'].strftime('%Y-%m-%d') if fi_final is not None else None,
+        "sharpe_ratio": fi_metrics['sharpe_ratio'],
+        "annual_return": fi_metrics['annual_return'],
+        "volatility": fi_metrics['volatility'],
+        "max_drawdown": fi_metrics['max_drawdown'],
+        "win_rate": fi_metrics['win_rate'],
+        "total_return": fi_metrics['total_return'],
+        "top_etfs": fi_final['selected_assets'] if fi_final is not None else [],
+        "forecasted_returns": fi_final['forecasted_returns'] if fi_final is not None else {},
+        "scores": fi_final['scores'] if fi_final is not None else {},
+    }
+
     token = os.getenv("HF_TOKEN")
-    try:
-        existing = load_dataset(args.output, split="train", token=token)
-        combined_df = pd.concat([existing.to_pandas(), pd.DataFrame([result_record])], ignore_index=True)
-        final_ds = Dataset.from_pandas(combined_df)
-    except:
-        final_ds = Dataset.from_pandas(pd.DataFrame([result_record]))
-    
-    push_with_retry(final_ds, args.output, token)
-    print("Training and upload complete.")
+    # Push equity results
+    eq_ds = Dataset.from_pandas(pd.DataFrame([equity_record]))
+    push_with_retry(eq_ds, "P2SAMAPA/p2-etf-sdf-engine-results-equity", token)
+    # Push FI results
+    fi_ds = Dataset.from_pandas(pd.DataFrame([fi_record]))
+    push_with_retry(fi_ds, "P2SAMAPA/p2-etf-sdf-engine-results-fi", token)
+
+    print("Done.")
 
 if __name__ == "__main__":
     main()
