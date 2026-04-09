@@ -46,6 +46,7 @@ class FICommodityEngine:
         self.reconstructor_ = None
         self.scorer_ = None
         self.sparse_loadings_ = None
+        self.train_returns_index_ = None  # Store the index from training
 
     def prepare_data(
         self,
@@ -84,6 +85,9 @@ class FICommodityEngine:
         Returns:
             Self
         """
+        # Store the index for later use
+        self.train_returns_index_ = train_returns.index
+        
         # Step 1: PCA Factor Extraction
         self.pca_ = PCAExtractor(
             min_factors=CONFIG['sdf_model']['pca']['min_factors'],
@@ -143,8 +147,8 @@ class FICommodityEngine:
         if self.pca_ is None:
             raise ValueError("Model not fitted. Call fit() first.")
 
-        # Get last factors from PCA
-        factors = self.pca_.get_factors(self.pca_.factors_)
+        # Get factors as DataFrame with proper index
+        factors = self.pca_.get_factors(self.train_returns_index_)
 
         # Forecast factors
         forecasted_factors = self.forecaster_.predict_factors(
