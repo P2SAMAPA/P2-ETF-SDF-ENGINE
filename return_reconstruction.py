@@ -52,11 +52,21 @@ class ReturnReconstructor:
         """
         # Create sparse loadings
         self.sparse_loadings_ = self._create_sparse_loadings(loadings)
+        
+        # Debug prints
+        print(f"  returns shape: {returns.values.shape}")
+        print(f"  factors shape: {factors.values.shape}")
+        print(f"  sparse_loadings shape: {self.sparse_loadings_.shape}")
+        print(f"  sparse_loadings.T shape: {self.sparse_loadings_.T.shape}")
 
         # Compute residual variance for each asset
-        # residual = actual_return - predicted_return
         # predicted = factors @ loadings.T (T x N)
+        # factors: (T, k), loadings: (N, k), loadings.T: (k, N)
+        # result: (T, k) @ (k, N) = (T, N)
         predicted = factors.values @ self.sparse_loadings_.T  # Shape: (T, N)
+        
+        print(f"  predicted shape: {predicted.shape}")
+        
         residuals = returns.values - predicted  # Shape: (T, N)
 
         self.residual_variance_ = np.var(residuals, axis=0)
@@ -115,6 +125,8 @@ class ReturnReconstructor:
             raise ValueError("Model not fitted yet")
 
         # Reconstruct returns: R_hat = F_hat @ Lambda^T (shape: N,)
+        # forecasted_factors: (k,), sparse_loadings_: (N, k), sparse_loadings_.T: (k, N)
+        # result: (k,) @ (k, N) = (N,)
         reconstructed = forecasted_factors @ self.sparse_loadings_.T
 
         # Apply residual volatility penalty
