@@ -1,0 +1,136 @@
+# =============================================================================
+# SDF Engine Configuration
+# =============================================================================
+
+# HuggingFace Configuration
+huggingface:
+  dataset_source: "P2SAMAPA/fi-etf-macro-signal-master-data"
+  dataset_results: "P2SAMAPA/p2-etf-sdf-engine-results"
+  token_env: "HF_TOKEN"  # Environment variable name for HF token
+
+# GitHub Configuration
+github:
+  repo: "P2SAMAPA/P2-ETF-SDF-ENGINE"
+  token_env: "GH_PAT"  # Environment variable name for GitHub PAT
+
+# Asset Universe
+universes:
+  equity:
+    name: "US Equity ETFs"
+    assets:
+      - QQQ   # Invesco QQQ Trust (NASDAQ-100)
+      - XLK   # Technology Select Sector SPDR Fund
+      - XLF   # Financial Select Sector SPDR Fund
+      - XLE   # Energy Select Sector SPDR Fund
+      - XLV   # Health Care Select Sector SPDR Fund
+      - XLI   # Industrial Select Sector SPDR Fund
+      - XLY   # Consumer Discretionary Select Sector SPDR Fund
+      - XLP   # Consumer Staples Select Sector SPDR Fund
+      - XLU   # Utilities Select Sector SPDR Fund
+      - VNQ   # Vanguard Real Estate ETF
+      - IWM   # iShares Russell 2000 ETF
+    benchmark: SPY  # SPDR S&P 500 ETF Trust (not in universe)
+
+  fi_commodities:
+    name: "FI/Commodity ETFs"
+    assets:
+      - GLD   # SPDR Gold Shares
+      - SLV   # iShares Silver Trust
+      - TLT   # iShares 20+ Year Treasury Bond ETF
+      - VCIT  # Vanguard Intermediate-Term Corporate Bond ETF
+      - LQD   # iShares iBoxx $ Investment Grade Corporate Bond ETF
+      - HYG   # iShares iBoxx $ High Yield Corporate Bond ETF
+      - XME   # SPDR S&P Metals and Mining ETF
+      - GDX   # VanEck Gold Miners ETF
+    benchmark: AGG  # iShares Core US Aggregate Bond ETF (not in universe)
+
+# Macro Indicators (exogenous inputs for VAR)
+macro_indicators:
+  - VIX        # CBOE Volatility Index
+  - DXY        # US Dollar Index
+  - T10Y2Y     # 10-Year Treasury Minus 2-Year Spread
+  - TBILL_3M   # 3-Month Treasury Bill Rate
+  - IG_SPREAD  # Investment Grade Credit Spread
+  - HY_SPREAD  # High Yield Credit Spread
+
+# SDF Model Parameters
+sdf_model:
+  # Factor Extraction (PCA)
+  pca:
+    min_factors: 3
+    max_factors: 5
+    ic_criterion: "bai_ng"  # Bai-Ng Information Criterion
+    standardize: true
+
+  # Sparse Rotation
+  rotation:
+    method: "varimax"  # VARIMAX rotation for interpretability
+    max_iter: 500
+    tol: 1e-6
+
+  # VAR + Kalman Filter
+  var:
+    lag_order: 2
+    use_kalman: true
+    kalman_smoother: true
+
+  # Signal Generation
+  signal:
+    residual_vol_penalty: 0.1  # Penalty weight for high residual vol
+    factor_exposure_weight: 0.3  # Weight for factor alignment
+
+# Backtest Configuration
+backtest:
+  # Date Range
+  start_date: "2008-01-01"
+  end_date: "2026-12-31"
+
+  # Window Strategies
+  window_strategies:
+    rolling:
+      enabled: true
+      name: "Rolling Window"
+      description: "Fixed size rolling window"
+      window_size: 252  # ~1 trading year
+
+    shrinking:
+      enabled: true
+      name: "Shrinking Window"
+      description: "Exponentially decaying window"
+      initial_size: 504  # ~2 trading years
+      decay_factor: 0.99
+      min_size: 126  # ~6 months minimum
+
+    expanding:
+      enabled: true
+      name: "Expanding Window"
+      description: "Grows from start, never shrinks"
+      min_size: 126  # ~6 months minimum
+      initial_gap: 252  # Skip first year for burn-in
+
+  # Performance Metrics
+  metrics:
+    - total_return
+    - annualized_return
+    - annualized_volatility
+    - sharpe_ratio
+    - max_drawdown
+    - calmar_ratio
+    - win_rate
+
+  # Rebalancing
+  rebalance:
+    frequency: "daily"  # daily, weekly, monthly
+    top_n: 3  # Number of top ETFs to select
+
+# Streamlit UI Configuration
+streamlit:
+  title: "SDF Engine - ETF Signal Generator"
+  tab_names:
+    equity: "Equity ETFs"
+    fi_commodities: "FI/Commodities"
+  theme:
+    primary_color: "#1E3A5F"
+    background_color: "#FFFFFF"
+    font_size: "large"
+  date_calendar: "US_MARKETS"  # US trading days calendar
