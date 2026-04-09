@@ -121,7 +121,7 @@ def generate_equity_signals(window_size=252, top_n=3):
     # Get latest data
     end_date = datetime.now().strftime('%Y-%m-%d')
     returns, macro, _ = engine.prepare_data(
-        start_date='2020-01-01',  # Use longer history for better training
+        start_date='2020-01-01',
         end_date=end_date
     )
     
@@ -243,7 +243,7 @@ def render_equity_tab():
         st.divider()
         
         # Selected ETFs
-        st.subheader("📊 Selected ETFs (Top 3)")
+        st.subheader("Selected ETFs (Top 3)")
         
         selected = result['signals']
         if len(selected) > 0:
@@ -251,9 +251,9 @@ def render_equity_tab():
                 with st.container():
                     st.markdown(f"""
                     <div class="selected-etf">
-                        <h3>📈 {row['asset']}</h3>
-                        <p><strong>Expected Return:</strong> {row['expected_return']*100:.4f}%<br>
-                        <strong>Composite Score:</strong> {row['composite_score']:.4f}</p>
+                        <h4>{row['asset']}</h4>
+                        <p>Expected Return: {row['expected_return']*100:.4f}% |
+                           Composite Score: {row['composite_score']:.4f}</p>
                     </div>
                     """, unsafe_allow_html=True)
         else:
@@ -262,7 +262,7 @@ def render_equity_tab():
         st.divider()
         
         # All ETF Scores
-        st.subheader("📋 All ETF Rankings")
+        st.subheader("All ETF Rankings")
         
         scores_df = result['signals'].copy()
         scores_df['Expected Return (%)'] = scores_df['expected_return'] * 100
@@ -278,7 +278,7 @@ def render_equity_tab():
         st.divider()
         
         # Factor Interpretations
-        st.subheader("🔍 Factor Interpretations")
+        st.subheader("Factor Interpretations")
         
         factor_df = result['factor_interpretations']
         if len(factor_df) > 0:
@@ -331,7 +331,7 @@ def render_fi_commodity_tab():
         st.divider()
         
         # Selected ETFs
-        st.subheader("📊 Selected ETFs (Top 3)")
+        st.subheader("Selected ETFs (Top 3)")
         
         selected = result['signals']
         if len(selected) > 0:
@@ -339,9 +339,9 @@ def render_fi_commodity_tab():
                 with st.container():
                     st.markdown(f"""
                     <div class="selected-etf">
-                        <h3>📈 {row['asset']}</h3>
-                        <p><strong>Expected Return:</strong> {row['expected_return']*100:.4f}%<br>
-                        <strong>Composite Score:</strong> {row['composite_score']:.4f}</p>
+                        <h4>{row['asset']}</h4>
+                        <p>Expected Return: {row['expected_return']*100:.4f}% |
+                           Composite Score: {row['composite_score']:.4f}</p>
                     </div>
                     """, unsafe_allow_html=True)
         else:
@@ -350,7 +350,7 @@ def render_fi_commodity_tab():
         st.divider()
         
         # All ETF Scores
-        st.subheader("📋 All ETF Rankings")
+        st.subheader("All ETF Rankings")
         
         scores_df = result['signals'].copy()
         scores_df['Expected Return (%)'] = scores_df['expected_return'] * 100
@@ -366,7 +366,7 @@ def render_fi_commodity_tab():
         st.divider()
         
         # Factor Interpretations
-        st.subheader("🔍 Factor Interpretations")
+        st.subheader("Factor Interpretations")
         
         factor_df = result['factor_interpretations']
         if len(factor_df) > 0:
@@ -395,11 +395,8 @@ def main():
     # Check for HF_TOKEN at startup
     hf_token = get_hf_token()
     if not hf_token:
-        st.error("""
-        ⚠️ **HF_TOKEN not found!**
-        
-        Please set your Hugging Face token to use this app.
-        
+        st.error("HF_TOKEN not found. Please set your Hugging Face token to use this app.")
+        st.markdown("""
         **For Streamlit Cloud:**
         1. Go to your app settings
         2. Add a secret named `HF_TOKEN` with your Hugging Face token
