@@ -16,3 +16,4 @@ plotly>=5.10.0
 # Configuration & utilities
 pyyaml>=6.0
 pytz
+pyarrow
