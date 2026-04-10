@@ -2,25 +2,67 @@ name: Parallel Matrix Training (CPU)
 
 on:
   workflow_dispatch:
+  # Add push trigger for quick validation
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
 
 env:
   HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
 jobs:
-  train:
+  # Quick validation job - runs first to catch errors fast
+  validate:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install datasets huggingface_hub pandas numpy scikit-learn statsmodels pyyaml
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+      
+      - name: Login to Hugging Face
+        run: python -c "from huggingface_hub import login; login(token='${{ env.HF_TOKEN }}')"
+      
+      - name: Quick validation (10 windows only)
+        env:
+          CI_MODE: true
+          MAX_WINDOWS: 10
+        run: python train.py --fold 0 --lr 0.01 --model xgb
+
+  # Full matrix training - only runs on manual dispatch or after validation passes
+  train:
+    needs: validate  # Waits for validate job to pass
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 300  # 4 hours max per job
     strategy:
-      max-parallel: 4
+      max-parallel: 2  # Reduced from 4 to prevent resource contention
+      fail-fast: false  # Let other jobs finish if one fails
       matrix:
         fold: [0, 1, 2, 3]
         lr: [0.001, 0.01]
         model: ["rf", "xgb"]
+        exclude:
+          # Skip slow combinations for initial testing
+          - fold: 3
+            lr: 0.001
+            model: rf
 
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
+          cache: 'pip'
 
       - name: Cache pip packages
         uses: actions/cache@v3
@@ -37,12 +79,26 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
       - name: Login to Hugging Face
-        run: |
-          python -c "from huggingface_hub import login; login(token='${{ env.HF_TOKEN }}')"
+        run: python -c "from huggingface_hub import login; login(token='${{ env.HF_TOKEN }}')"
 
       - name: Run training
+        env:
+          CI_MODE: true  # Enable optimizations for CI
         run: |
           python train.py \
             --fold ${{ matrix.fold }} \
             --lr ${{ matrix.lr }} \
-            --model ${{ matrix.model }}
+            --model ${{ matrix.model }} \
+            --start-date 2020-01-01  # Reduce data range for speed
+
+      - name: Upload artifacts
+        if: always()  # Upload even if job fails/times out
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-fold${{ matrix.fold }}-lr${{ matrix.lr }}-${{ matrix.model }}
+          path: |
+            outputs/
+            models/
+            *.pkl
+            *.json
+          retention-days: 7
