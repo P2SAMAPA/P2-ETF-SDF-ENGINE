@@ -24,7 +24,7 @@ class BacktestConfig:
     """Configuration for backtest."""
     start_date: str
     end_date: str
-    window_type: str  # 'rolling', 'shrinking', 'expanding'
+    window_type: str
     window_size: int = 252
     initial_size: int = 504
     decay_factor: float = 0.99
@@ -45,25 +45,12 @@ class BacktestEngine:
         macro_indicators: Optional[list] = None,
         hf_token: Optional[str] = None
     ):
-        """
-        Initialize backtest engine.
-
-        Args:
-            assets: List of asset tickers
-            benchmark: Benchmark ticker (not in assets)
-            macro_indicators: List of macro indicators to use
-            hf_token: HuggingFace token
-        """
         self.assets = assets
         self.benchmark = benchmark
         self.macro_indicators = macro_indicators or CONFIG['macro_indicators']
-
-        # Load data
         self.loader = DataLoader(hf_token=hf_token)
-        self.preprocessor = Preprocessor()  # For filling missing values
+        self.preprocessor = Preprocessor()
         self.raw_data = self.loader.load_raw_data()
-
-        # Processed data will be stored
         self.returns_ = None
         self.macro_ = None
         self.benchmark_returns_ = None
@@ -73,31 +60,9 @@ class BacktestEngine:
         start_date: str,
         end_date: str
     ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series]:
-        """
-        Prepare data for backtesting.
-
-        Args:
-            start_date: Start date
-            end_date: End date
-
-        Returns:
-            Tuple of (returns, macro, benchmark_returns)
-        """
-        # Get returns
-        self.returns_ = self.loader.get_universe_data(
-            self.assets, start_date, end_date
-        )
-
-        # Get macro data
-        self.macro_ = self.loader.get_macro_data(
-            self.macro_indicators, start_date, end_date
-        )
-
-        # Get benchmark returns
-        self.benchmark_returns_ = self.loader.get_benchmark_data(
-            self.benchmark, start_date, end_date
-        )
-
+        self.returns_ = self.loader.get_universe_data(self.assets, start_date, end_date)
+        self.macro_ = self.loader.get_macro_data(self.macro_indicators, start_date, end_date)
+        self.benchmark_returns_ = self.loader.get_benchmark_data(self.benchmark, start_date, end_date)
         return self.returns_, self.macro_, self.benchmark_returns_
 
     def _run_single_period(
@@ -107,40 +72,23 @@ class BacktestEngine:
         test_returns: pd.Series,
         config: BacktestConfig
     ) -> Dict:
-        """
-        Run single backtest period.
-
-        Args:
-            train_returns: Training period returns
-            train_macro: Training period macro data
-            test_returns: Test period (single day) returns
-            config: Backtest configuration
-
-        Returns:
-            Dictionary with results
-        """
         try:
-            # ----- FILL MISSING VALUES -----
             train_returns_filled = self.preprocessor.fill_missing_values(train_returns)
             train_macro_filled = self.preprocessor.fill_missing_values(train_macro)
 
-            # Step 1: Extract factors with PCA
+            # Step 1: PCA
             pca = PCAExtractor(
                 min_factors=CONFIG['sdf_model']['pca']['min_factors'],
                 max_factors=CONFIG['sdf_model']['pca']['max_factors'],
                 standardize=True
             )
             pca.fit(train_returns_filled)
-
             factors = pca.get_factors(train_returns_filled.index)
 
             # Step 2: Sparse rotation
             rotator = SparseRotation(max_iter=CONFIG['sdf_model']['rotation']['max_iter'])
             rotator.fit(pca.loadings_)
-            sparse_loadings = SparseRotation.create_sparse_mask(
-                rotator.rotated_loadings_,
-                top_n=3
-            )
+            sparse_loadings = SparseRotation.create_sparse_mask(rotator.rotated_loadings_, top_n=3)
 
             # Step 3: VAR forecast
             forecaster = VARForecast(
@@ -163,10 +111,25 @@ class BacktestEngine:
                 residual_vol_penalty=config.residual_penalty
             )
             scorer.fit(self.assets, factors.columns.tolist(), sparse_loadings, reconstructor.residual_std_)
-            scores = scorer.compute_scores(forecasted_returns, forecasted_factors)
-            selected = scorer.select_top_n(scores, config.top_n)
+            
+            # Get scores DataFrame
+            scores_df = scorer.compute_scores(forecasted_returns, forecasted_factors)
+            selected = scorer.select_top_n(scores_df, config.top_n)
 
-            # Calculate strategy return (equal weight of top N)
+            # FIX: Convert scores to simple {asset: score} dict
+            # scores_df has columns: ['asset', 'expected_return', 'norm_return', 'factor_exposure_score', 'residual_vol_penalty', 'composite_score']
+            scores_dict = {}
+            for _, row in scores_df.iterrows():
+                asset_name = row['asset']
+                # Use composite_score as the main score
+                scores_dict[asset_name] = float(row['composite_score'])
+            
+            # Debug
+            print(f"  Computed {len(scores_dict)} scores")
+            if scores_dict:
+                sample = list(scores_dict.items())[:3]
+                print(f"  Sample: {sample}")
+
             selected_assets = selected['asset'].tolist()
             if len(selected_assets) > 0:
                 strategy_return = test_returns[selected_assets].mean()
@@ -178,15 +141,19 @@ class BacktestEngine:
                 'selected_assets': selected_assets,
                 'strategy_return': strategy_return,
                 'forecasted_returns': dict(zip(self.assets, forecasted_returns)),
-                'scores': scores.to_dict()
+                'scores': scores_dict  # Now a simple {asset: score} dict
             }
 
         except Exception as e:
             warnings.warn(f"Error in period {test_returns.name}: {e}")
+            import traceback
+            traceback.print_exc()
             return {
                 'date': test_returns.name,
                 'selected_assets': [],
                 'strategy_return': 0,
+                'forecasted_returns': {},
+                'scores': {},
                 'error': str(e)
             }
 
@@ -199,21 +166,6 @@ class BacktestEngine:
         max_windows: Optional[int] = None,
         rebalance_freq: int = 1
     ) -> pd.DataFrame:
-        """
-        Run rolling window backtest.
-
-        Args:
-            start_date: Backtest start date
-            end_date: Backtest end date
-            window_size: Rolling window size
-            top_n: Number of top ETFs to hold
-            max_windows: Maximum number of windows to process (for CI/testing)
-            rebalance_freq: Rebalance every N days (default 1=daily, 5=weekly)
-
-        Returns:
-            DataFrame with backtest results
-        """
-        # Prepare data
         self.prepare_data(start_date, end_date)
 
         config = BacktestConfig(
@@ -228,12 +180,10 @@ class BacktestEngine:
         results = []
         all_dates = self.returns_.index[window_size:]
         
-        # Apply rebalance frequency (skip days)
         if rebalance_freq > 1:
             all_dates = all_dates[::rebalance_freq]
             print(f"Rebalancing every {rebalance_freq} days: {len(all_dates)} periods")
         
-        # Limit windows if specified
         if max_windows and len(all_dates) > max_windows:
             print(f"CI MODE: Limiting from {len(all_dates)} to {max_windows} windows")
             all_dates = all_dates[:max_windows]
@@ -242,102 +192,75 @@ class BacktestEngine:
         is_ci = os.getenv('CI_MODE', '').lower() == 'true' or os.getenv('GITHUB_ACTIONS', '').lower() == 'true'
         
         for i, date in enumerate(all_dates):
-            # Progress logging (less frequent in CI to reduce overhead)
             if i % (10 if is_ci else 50) == 0 or i == total - 1:
                 print(f"Rolling: Processing {date.date()} ({i+1}/{total})")
 
-            # Find the index in returns for this date
             date_idx = self.returns_.index.get_loc(date)
             train_returns = self.returns_.iloc[date_idx - window_size:date_idx]
             train_macro = self.macro_.loc[train_returns.index]
             test_returns = self.returns_.iloc[date_idx]
 
-            result = self._run_single_period(
-                train_returns, train_macro, test_returns, config
-            )
+            result = self._run_single_period(train_returns, train_macro, test_returns, config)
             results.append(result)
 
         return pd.DataFrame(results)
 
     @staticmethod
-    def calculate_performance(
-        returns: pd.Series,
-        benchmark_returns: pd.Series
-    ) -> Dict:
-        """
-        Calculate performance metrics.
-
-        Args:
-            returns: Strategy returns
-            benchmark_returns: Benchmark returns
-
-        Returns:
-            Dictionary of performance metrics
-        """
-        # Align indices
+    def calculate_performance(returns: pd.Series, benchmark_returns: pd.Series) -> Dict:
         common_idx = returns.index.intersection(benchmark_returns.index)
         returns = returns.loc[common_idx]
         benchmark = benchmark_returns.loc[common_idx]
 
         if len(returns) == 0:
             return {
-                'total_return': np.nan,
-                'annual_return': np.nan,
-                'volatility': np.nan,
-                'sharpe_ratio': np.nan,
-                'max_drawdown': np.nan,
-                'win_rate': np.nan,
+                'total_return': 0.0,
+                'annual_return': 0.0,
+                'volatility': 0.0,
+                'sharpe_ratio': 0.0,
+                'max_drawdown': 0.0,
+                'win_rate': 0.0,
                 'total_trades': 0
             }
 
-        # Cumulative returns
         cum_returns = (1 + returns).cumprod()
-        cum_benchmark = (1 + benchmark).cumprod()
-
-        # Metrics
         total_return = cum_returns.iloc[-1] - 1
         years = len(returns) / 252
-        annual_return = (1 + total_return) ** (1 / years) - 1 if years > 0 else 0
+        
+        # FIX: Better annualization for short periods
+        if years > 0.1:  # At least ~1 month
+            annual_return = (1 + total_return) ** (1 / years) - 1
+        else:
+            # For very short periods, use simple scaling
+            annual_return = total_return * (252 / len(returns))
+        
+        annual_return = 0.0 if not np.isfinite(annual_return) else float(annual_return)
 
         volatility = returns.std() * np.sqrt(252)
-        sharpe = annual_return / (volatility + 1e-8)  # add small epsilon to avoid division by zero
+        sharpe = annual_return / (volatility + 1e-8) if volatility > 0 else 0.0
+        sharpe = float(np.clip(sharpe, -10, 10))
 
-        # Max drawdown
         rolling_max = cum_returns.cummax()
         drawdown = (cum_returns - rolling_max) / rolling_max
-        max_drawdown = drawdown.min()
-
-        # Win rate
-        win_rate = (returns > 0).mean()
+        max_drawdown = float(drawdown.min())
+        win_rate = float((returns > 0).mean())
 
         return {
-            'total_return': total_return,
+            'total_return': float(total_return),
             'annual_return': annual_return,
-            'volatility': volatility,
+            'volatility': float(volatility),
             'sharpe_ratio': sharpe,
             'max_drawdown': max_drawdown,
             'win_rate': win_rate,
             'total_trades': len(returns),
             'cum_returns': cum_returns,
-            'cum_benchmark': cum_benchmark
+            'cum_benchmark': (1 + benchmark).cumprod()
         }
 
 
-# Example usage
 if __name__ == "__main__":
-    # Sample backtest for equity universe
     assets = CONFIG['universes']['equity']['assets']
     benchmark = CONFIG['universes']['equity']['benchmark']
-
     engine = BacktestEngine(assets, benchmark)
-
-    # Run single strategy
-    results = engine.run_rolling_window(
-        start_date='2020-01-01',
-        end_date='2024-12-31',
-        window_size=252,
-        top_n=3
-    )
-
+    results = engine.run_rolling_window('2020-01-01', '2024-12-31', window_size=252, top_n=3)
     print(f"Backtest completed: {len(results)} periods")
     print(results.head())
