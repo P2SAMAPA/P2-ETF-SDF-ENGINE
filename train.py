@@ -16,7 +16,6 @@ from datetime import datetime
 from io import BytesIO
 
 from huggingface_hub import HfApi
-from huggingface_hub.errors import HfHubHTTPError
 
 from configs import CONFIG
 from backtest_engine import BacktestEngine
@@ -46,8 +45,11 @@ def override_config(lr: float):
 
 
 def safe_metrics(strategy_returns, benchmark_returns):
-    """Compute metrics with overflow protection."""
+    """Compute metrics with overflow protection for short periods."""
+    print("Computing performance metrics...")
+    
     if len(strategy_returns) == 0:
+        print("WARNING: Empty strategy returns")
         return {k: 0.0 for k in ['sharpe_ratio', 'annual_return', 'volatility',
                                  'max_drawdown', 'win_rate', 'total_return']}
     
@@ -55,37 +57,57 @@ def safe_metrics(strategy_returns, benchmark_returns):
     r = strategy_returns.loc[common_idx]
     
     if len(r) == 0:
+        print("WARNING: No overlapping dates")
         return {k: 0.0 for k in ['sharpe_ratio', 'annual_return', 'volatility',
                                  'max_drawdown', 'win_rate', 'total_return']}
     
+    # Calculate metrics
     total_return = (1 + r).prod() - 1
-    years = len(r) / 252
+    total_return = float(np.clip(total_return, -0.9999, 100.0))
     
-    # Clamp to prevent overflow
-    total_return = np.clip(total_return, -0.9999, 100.0)
-    annual_return = (1 + total_return) ** (1 / max(years, 0.01)) - 1
-    annual_return = 0.0 if not np.isfinite(annual_return) else float(annual_return)
+    n_days = len(r)
+    years = n_days / 252.0
+    
+    print(f"  Period: {n_days} days ({years:.3f} years), Total return: {total_return:.4f}")
+    
+    # FIX: Use appropriate annualization method
+    if years >= 1.0:
+        # Standard annualization for 1+ year
+        annual_return = (1 + total_return) ** (1 / years) - 1
+    elif n_days > 0:
+        # Simple scaling for short periods (avoids overflow)
+        annual_return = total_return * (252.0 / n_days)
+    else:
+        annual_return = 0.0
+    
+    # Validate
+    if not np.isfinite(annual_return):
+        print(f"  WARNING: Non-finite annual_return ({annual_return}), using 0")
+        annual_return = 0.0
+    
+    annual_return = float(np.clip(annual_return, -1.0, 10.0))  # Cap at 1000% return
     
     volatility = r.std() * np.sqrt(252)
+    volatility = float(volatility) if np.isfinite(volatility) else 0.0
+    
     sharpe = annual_return / (volatility + 1e-8) if volatility > 0 else 0.0
     sharpe = float(np.clip(sharpe, -10, 10))
     
     cum = (1 + r).cumprod()
     rolling_max = cum.cummax()
     drawdown = (cum - rolling_max) / rolling_max
-    max_drawdown = float(drawdown.min())
+    max_drawdown = float(drawdown.min()) if len(drawdown) > 0 else 0.0
     win_rate = float((r > 0).mean())
     
-    # Debug metrics
-    print(f"  Calculated: AnnRet={annual_return:.6f}, Sharpe={sharpe:.6f}, MaxDD={max_drawdown:.6f}")
+    print(f"  Results: AnnRet={annual_return:.4f}, Sharpe={sharpe:.3f}, MaxDD={max_drawdown:.4f}")
     
     return {
         'sharpe_ratio': sharpe,
         'annual_return': annual_return,
-        'volatility': float(volatility),
+        'volatility': volatility,
         'max_drawdown': max_drawdown,
         'win_rate': win_rate,
-        'total_return': float(total_return),
+        'total_return': total_return,
     }
 
 
@@ -106,48 +128,21 @@ def run_backtest(assets, benchmark, start_date, end_date, window_size, top_n, ma
     
     _, _, benchmark_returns = engine.prepare_data(start_date, end_date)
     strat_returns = results_df.set_index('date')['strategy_return']
+    
+    print(f"Strategy returns: {len(strat_returns)} periods")
+    print(f"Return range: {strat_returns.min():.4f} to {strat_returns.max():.4f}")
+    
     metrics = safe_metrics(strat_returns, benchmark_returns)
     final_signals = results_df.iloc[-1] if len(results_df) > 0 else None
     
-    print(f"Completed: Sharpe={metrics['sharpe_ratio']:.3f}, Return={metrics['annual_return']:.4f}")
-    return metrics, final_signals
-
-
-def extract_scores(scores_dict):
-    """
-    Extract scores from various possible formats:
-    - Dict of floats: {'XLE': 0.5, 'XLF': 0.3}
-    - Dict of dicts: {'XLE': {'score': 0.5, 'factor_exposure': 0.3}, ...}
-    - Pandas Series converted to dict
-    """
-    if not scores_dict:
-        return {}
+    # Debug scores
+    if final_signals is not None:
+        scores = final_signals.get('scores', {})
+        print(f"Final scores count: {len(scores)}")
+        if scores:
+            print(f"Score sample: {list(scores.items())[:3]}")
     
-    result = {}
-    for k, v in scores_dict.items():
-        key = str(k)
-        
-        if isinstance(v, dict):
-            # Look for 'score' key first, then any numeric value
-            if 'score' in v:
-                val = v['score']
-            elif 'total_score' in v:
-                val = v['total_score']
-            else:
-                # Take first numeric value
-                val = next((x for x in v.values() if isinstance(x, (int, float, np.number))), 0)
-        elif hasattr(v, 'item'):  # numpy scalar
-            val = v.item()
-        else:
-            val = v
-            
-        # Ensure it's a clean float
-        try:
-            result[key] = float(val) if np.isfinite(float(val)) else 0.0
-        except (TypeError, ValueError):
-            result[key] = 0.0
-            
-    return result
+    return metrics, final_signals
 
 
 def save_json_to_hf(api, repo_id, filename, data, token):
@@ -170,7 +165,6 @@ def save_json_to_hf(api, repo_id, filename, data, token):
             wait = 2 ** attempt
             print(f"Retry {attempt+1} in {wait}s: {e}")
             time.sleep(wait)
-    
     return False
 
 
@@ -223,14 +217,20 @@ def main():
                 except:
                     forecasted[str(k)] = 0.0
         
-        # Extract scores using dedicated function
-        scores = extract_scores(final.get('scores', {})) if final is not None else {}
+        # Extract scores - should now be {asset: float}
+        scores = final.get('scores', {}) if final is not None else {}
         
-        # Debug output
-        print(f"  {universe}: Extracted {len(scores)} scores, {len(forecasted)} forecasts")
-        if scores:
-            sample = list(scores.items())[:3]
-            print(f"  Sample scores: {sample}")
+        # Validate scores are simple floats
+        clean_scores = {}
+        for k, v in scores.items():
+            try:
+                clean_scores[str(k)] = float(v) if np.isfinite(float(v)) else 0.0
+            except:
+                clean_scores[str(k)] = 0.0
+        
+        print(f"{universe}: {len(clean_scores)} scores, {len(forecasted)} forecasts")
+        if clean_scores:
+            print(f"  Sample scores: {list(clean_scores.items())[:3]}")
         
         return {
             "fold": int(args.fold),
@@ -248,7 +248,7 @@ def main():
             "total_return": float(metrics['total_return']),
             "top_etfs": [str(x) for x in final['selected_assets']] if final is not None else [],
             "forecasted_returns": forecasted,
-            "scores": scores,
+            "scores": clean_scores,
         }
     
     equity_record = build_record(eq_metrics, eq_final, "equity", eq_bench)
@@ -275,6 +275,7 @@ def main():
     save_json_to_hf(api, repo_id, fi_file, fi_record, token)
     
     print("\n=== Training complete ===")
+
 
 if __name__ == "__main__":
     main()
