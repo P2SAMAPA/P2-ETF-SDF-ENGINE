@@ -2,10 +2,11 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import os
+import json
 from datetime import datetime
 from pandas.tseries.offsets import CustomBusinessDay
 from pandas.tseries.holiday import USFederalHolidayCalendar
-from datasets import load_dataset
+from huggingface_hub import hf_hub_download, list_repo_files, HfApi
 
 st.set_page_config(page_title="SDF Engine", layout="wide", initial_sidebar_state="collapsed")
 
@@ -30,25 +31,61 @@ st.markdown("""
 def get_hf_token():
     return st.secrets.get("HF_TOKEN") or os.getenv("HF_TOKEN")
 
-@st.cache_data(ttl=300)  # Cache for 5 minutes
-def load_best_result(dataset_name):
+@st.cache_data(ttl=60)
+def load_best_result_json(repo_id, universe_prefix):
+    """
+    Load best result from JSON files in HF dataset.
+    universe_prefix: 'equity' or 'fi'
+    """
     token = get_hf_token()
     if not token:
         st.error("HF_TOKEN not found in secrets or environment")
         return None
+    
     try:
-        ds = load_dataset(dataset_name, split="train", token=token)
-        df = ds.to_pandas()
-        if len(df) == 0:
+        # List all files in repo
+        api = HfApi()
+        files = list_repo_files(repo_id, repo_type="dataset", token=token)
+        
+        # Filter for universe JSON files
+        json_files = [f for f in files if f.startswith(universe_prefix) and f.endswith('.json')]
+        
+        if not json_files:
+            st.warning(f"No {universe_prefix} JSON files found in {repo_id}")
             return None
-        # Choose best Sharpe ratio
-        if 'sharpe_ratio' in df.columns and not df['sharpe_ratio'].isna().all():
-            best = df.loc[df['sharpe_ratio'].idxmax()]
-        else:
-            best = df.iloc[0]
-        return best.to_dict()
+        
+        # Load all results and find best Sharpe
+        best_record = None
+        best_sharpe = -np.inf
+        
+        for filename in json_files:
+            try:
+                # Download and parse JSON
+                file_path = hf_hub_download(
+                    repo_id=repo_id,
+                    filename=filename,
+                    repo_type="dataset",
+                    token=token
+                )
+                
+                with open(file_path, 'r') as f:
+                    record = json.load(f)
+                
+                # Check sharpe ratio
+                sharpe = record.get('sharpe_ratio', -np.inf)
+                if isinstance(sharpe, (int, float)) and np.isfinite(sharpe):
+                    if sharpe > best_sharpe:
+                        best_sharpe = sharpe
+                        best_record = record
+                        
+            except Exception as e:
+                print(f"Error loading {filename}: {e}")
+                continue
+        
+        return best_record
+        
     except Exception as e:
-        st.error(f"Error loading {dataset_name}: {str(e)}")
+        st.error(f"Error loading from {repo_id}: {str(e)}")
         return None
 
 def get_next_trading_date():
@@ -61,35 +98,33 @@ def safe_get(data, key, default=None):
     if data is None:
         return default
     value = data.get(key, default)
-    # Handle NaN, None, or empty values
     if value is None or (isinstance(value, float) and np.isnan(value)):
         return default
     return value
 
-def render_universe(title, dataset_name, benchmark):
+def render_universe(title, universe_prefix, benchmark):
     st.header(title)
     st.markdown(f"**Benchmark:** {benchmark}")
-    data = load_best_result(dataset_name)
+    
+    repo_id = "P2SAMAPA/p2-etf-sdf-engine-results"
+    data = load_best_result_json(repo_id, universe_prefix)
+    
     if not data:
         st.warning("No results found. Run training first.")
         return
 
     next_date = get_next_trading_date()
     
-    # FIX: Use safe_get to handle None/NaN values properly
+    # Extract data safely
     top_etfs = safe_get(data, 'top_etfs', [])
     forecasted = safe_get(data, 'forecasted_returns', {})
     scores = safe_get(data, 'scores', {})
     
-    # Ensure top_etfs is a list
+    # Ensure types
     if not isinstance(top_etfs, list):
         top_etfs = []
-    
-    # Ensure forecasted is a dict
     if not isinstance(forecasted, dict):
         forecasted = {}
-    
-    # Ensure scores is a dict
     if not isinstance(scores, dict):
         scores = {}
 
@@ -116,12 +151,12 @@ def render_universe(title, dataset_name, benchmark):
             if secondary:
                 st.markdown(f"📈 **{secondary}** +{sec_return*100:.3f}%", unsafe_allow_html=True)
         with col2:
-            # FIX: Safe metric access with defaults
+            # Safe metric access
             ann_return = safe_get(data, 'annual_return', 0)
             sharpe = safe_get(data, 'sharpe_ratio', 0)
             max_dd = safe_get(data, 'max_drawdown', 0)
             
-            # Handle inf/nan values
+            # Handle inf/nan
             if not isinstance(ann_return, (int, float)) or not np.isfinite(ann_return):
                 ann_return = 0
             if not isinstance(sharpe, (int, float)) or not np.isfinite(sharpe):
@@ -140,18 +175,16 @@ def render_universe(title, dataset_name, benchmark):
     st.markdown("---")
     st.subheader("All ETF Rankings")
     
-    # FIX: Safely build rankings DataFrame
+    # Build rankings safely
     if forecasted and len(forecasted) > 0:
         try:
             rank_data = []
             for k, v in forecasted.items():
-                # Handle various value types
                 if isinstance(v, (int, float)) and np.isfinite(v):
                     ret_val = v * 100
                 else:
                     ret_val = 0.0
                     
-                # Get score safely
                 score_val = scores.get(k, 0)
                 if not isinstance(score_val, (int, float)) or not np.isfinite(score_val):
                     score_val = 0.0
@@ -177,9 +210,9 @@ def main():
     st.title("SDF Engine – ETF Signal Generator")
     tab1, tab2 = st.tabs(["📈 Equity ETFs", "🏦 FI & Commodities"])
     with tab1:
-        render_universe("US Equity ETFs", "P2SAMAPA/p2-etf-sdf-engine-results-equity", "SPY")
+        render_universe("US Equity ETFs", "equity", "SPY")
     with tab2:
-        render_universe("Fixed Income & Commodities", "P2SAMAPA/p2-etf-sdf-engine-results-fi", "AGG")
+        render_universe("Fixed Income & Commodities", "fi", "AGG")
     st.markdown(f'<div class="footer">Model trained on data up to {datetime.now().strftime("%d %b %Y")}</div>', unsafe_allow_html=True)
 
 if __name__ == "__main__":
