@@ -7,6 +7,7 @@ import pandas as pd
 from typing import Dict, Tuple, Optional
 from dataclasses import dataclass
 import warnings
+import os
 
 from data_loader import DataLoader
 from preprocessor import Preprocessor
@@ -111,7 +112,7 @@ class BacktestEngine:
 
         Args:
             train_returns: Training period returns
-            train_macro: Training period macro data
+            train_macro: Training macro data
             test_returns: Test period (single day) returns
             config: Backtest configuration
 
@@ -194,7 +195,9 @@ class BacktestEngine:
         start_date: str,
         end_date: str,
         window_size: int = 252,
-        top_n: int = 3
+        top_n: int = 3,
+        max_windows: Optional[int] = None,  # NEW: Limit windows for CI
+        rebalance_freq: int = 1  # NEW: Process every Nth day (1=daily, 5=weekly, 21=monthly)
     ) -> pd.DataFrame:
         """
         Run rolling window backtest.
@@ -204,6 +207,8 @@ class BacktestEngine:
             end_date: Backtest end date
             window_size: Rolling window size
             top_n: Number of top ETFs to hold
+            max_windows: Maximum number of windows to process (for CI/testing)
+            rebalance_freq: Rebalance every N days (default 1=daily, 5=weekly)
 
         Returns:
             DataFrame with backtest results
@@ -221,15 +226,37 @@ class BacktestEngine:
         )
 
         results = []
-        dates = self.returns_.index[window_size:]
+        all_dates = self.returns_.index[window_size:]
+        
+        # NEW: Apply rebalance frequency (skip days)
+        if rebalance_freq > 1:
+            all_dates = all_dates[::rebalance_freq]
+            print(f"Rebalancing every {rebalance_freq} days: {len(all_dates)} periods")
+        
+        # NEW: Limit windows if specified
+        if max_windows and len(all_dates) > max_windows:
+            print(f"CI MODE: Limiting from {len(all_dates)} to {max_windows} windows")
+            all_dates = all_dates[:max_windows]
 
-        for i, date in enumerate(dates):
-            if i % 50 == 0:
-                print(f"Rolling: Processing {date.date()} ({i+1}/{len(dates)})")
+        total = len(all_dates)
+        is_ci = os.getenv('CI_MODE', '').lower() == 'true' or os.getenv('GITHUB_ACTIONS', '').lower() == 'true'
+        
+        for i, date in enumerate(all_dates):
+            # Progress logging (less frequent in CI to reduce overhead)
+            if i % (10 if is_ci else 50) == 0 or i == total - 1:
+                print(f"Rolling: Processing {date.date()} ({i+1}/{total})")
+                
+                # CI SAFETY: Check for timeout approaching (8 min mark)
+                if is_ci and i > 0 and i % 50 == 0:
+                    import time
+                    # Note: GitHub Actions has 10 min default timeout, warn at 8 min
+                    print(f"CI progress check: {i}/{total} windows processed")
 
-            train_returns = self.returns_.iloc[i:i + window_size]
+            # Find the index in returns for this date
+            date_idx = self.returns_.index.get_loc(date)
+            train_returns = self.returns_.iloc[date_idx - window_size:date_idx]
             train_macro = self.macro_.loc[train_returns.index]
-            test_returns = self.returns_.iloc[i + window_size]
+            test_returns = self.returns_.iloc[date_idx]
 
             result = self._run_single_period(
                 train_returns, train_macro, test_returns, config
