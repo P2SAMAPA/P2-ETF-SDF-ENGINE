@@ -2,7 +2,6 @@ name: Parallel Matrix Training (CPU)
 
 on:
   workflow_dispatch:
-  # Add push trigger for quick validation
   push:
     branches: [main]
   pull_request:
@@ -12,10 +11,9 @@ env:
   HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
 jobs:
-  # Quick validation job - runs first to catch errors fast
   validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -32,30 +30,24 @@ jobs:
       - name: Login to Hugging Face
         run: python -c "from huggingface_hub import login; login(token='${{ env.HF_TOKEN }}')"
       
-      - name: Quick validation (10 windows only)
+      - name: Quick validation
         env:
           CI_MODE: true
           MAX_WINDOWS: 10
         run: python train.py --fold 0 --lr 0.01 --model xgb
 
-  # Full matrix training - only runs on manual dispatch or after validation passes
   train:
-    needs: validate  # Waits for validate job to pass
+    needs: validate
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    timeout-minutes: 300  # 4 hours max per job
+    timeout-minutes: 240
     strategy:
-      max-parallel: 2  # Reduced from 4 to prevent resource contention
-      fail-fast: false  # Let other jobs finish if one fails
+      max-parallel: 2
+      fail-fast: false
       matrix:
         fold: [0, 1, 2, 3]
         lr: [0.001, 0.01]
         model: ["rf", "xgb"]
-        exclude:
-          # Skip slow combinations for initial testing
-          - fold: 3
-            lr: 0.001
-            model: rf
 
     steps:
       - uses: actions/checkout@v4
@@ -83,16 +75,15 @@ jobs:
 
       - name: Run training
         env:
-          CI_MODE: true  # Enable optimizations for CI
+          CI_MODE: true
         run: |
           python train.py \
             --fold ${{ matrix.fold }} \
             --lr ${{ matrix.lr }} \
-            --model ${{ matrix.model }} \
-            --start-date 2020-01-01  # Reduce data range for speed
+            --model ${{ matrix.model }}
 
       - name: Upload artifacts
-        if: always()  # Upload even if job fails/times out
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: model-fold${{ matrix.fold }}-lr${{ matrix.lr }}-${{ matrix.model }}
