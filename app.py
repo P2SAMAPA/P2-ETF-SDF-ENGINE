@@ -6,7 +6,8 @@ import json
 from datetime import datetime
 from pandas.tseries.offsets import CustomBusinessDay
 from pandas.tseries.holiday import USFederalHolidayCalendar
-from datasets import load_dataset
+from huggingface_hub import hf_hub_download, list_repo_files
+import tempfile
 
 st.set_page_config(page_title="SDF Engine", layout="wide")
 
@@ -27,20 +28,24 @@ def get_hf_token():
 
 
 @st.cache_data(ttl=300)
-def load_best_result_from_parquet(parquet_file):
-    """Load best result from specific Parquet file."""
+def load_best_result_from_parquet(parquet_filename):
+    """Load best result from specific Parquet file using direct download."""
     token = get_hf_token()
     if not token:
+        st.error("HF_TOKEN not found")
         return None
     
     try:
-        ds = load_dataset(
-            "P2SAMAPA/p2-etf-sdf-engine-results", 
-            data_files=parquet_file,
-            split="train", 
+        # Download file from HF Hub
+        file_path = hf_hub_download(
+            repo_id="P2SAMAPA/p2-etf-sdf-engine-results",
+            filename=parquet_filename,
+            repo_type="dataset",
             token=token
         )
-        df = ds.to_pandas()
+        
+        # Read with pandas
+        df = pd.read_parquet(file_path)
         
         if len(df) == 0:
             return None
@@ -57,7 +62,9 @@ def load_best_result_from_parquet(parquet_file):
         return best
         
     except Exception as e:
-        st.error(f"Load error for {parquet_file}: {e}")
+        st.error(f"Error loading {parquet_filename}: {str(e)}")
+        import traceback
+        st.code(traceback.format_exc())
         return None
 
 
@@ -67,11 +74,11 @@ def get_next_trading_date():
     return (datetime.now().date() + nyse).strftime('%Y-%m-%d')
 
 
-def render_universe(title, parquet_file, benchmark):
+def render_universe(title, parquet_filename, benchmark):
     st.header(title)
     st.markdown(f"**Benchmark:** {benchmark}")
     
-    data = load_best_result_from_parquet(parquet_file)
+    data = load_best_result_from_parquet(parquet_filename)
     if not data:
         st.warning("No results found.")
         return
@@ -87,7 +94,7 @@ def render_universe(title, parquet_file, benchmark):
         'max_drawdown': data.get('max_drawdown', 0)
     }
     
-    # Validate
+    # Validate metrics
     for k in metrics:
         if not isinstance(metrics[k], (int, float)) or not np.isfinite(metrics[k]):
             metrics[k] = 0.0
