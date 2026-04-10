@@ -76,6 +76,9 @@ def safe_metrics(strategy_returns, benchmark_returns):
     max_drawdown = float(drawdown.min())
     win_rate = float((r > 0).mean())
     
+    # Debug metrics
+    print(f"  Calculated: AnnRet={annual_return:.6f}, Sharpe={sharpe:.6f}, MaxDD={max_drawdown:.6f}")
+    
     return {
         'sharpe_ratio': sharpe,
         'annual_return': annual_return,
@@ -110,22 +113,40 @@ def run_backtest(assets, benchmark, start_date, end_date, window_size, top_n, ma
     return metrics, final_signals
 
 
-def convert_scores(scores_dict):
-    """Flatten scores to simple float dict."""
+def extract_scores(scores_dict):
+    """
+    Extract scores from various possible formats:
+    - Dict of floats: {'XLE': 0.5, 'XLF': 0.3}
+    - Dict of dicts: {'XLE': {'score': 0.5, 'factor_exposure': 0.3}, ...}
+    - Pandas Series converted to dict
+    """
     if not scores_dict:
         return {}
     
     result = {}
     for k, v in scores_dict.items():
         key = str(k)
+        
         if isinstance(v, dict):
-            # Take 'score' or first numeric value
-            val = v.get('score', next((x for x in v.values() if isinstance(x, (int, float))), 0))
-            result[key] = float(val) if np.isfinite(val) else 0.0
-        elif isinstance(v, (int, float)):
-            result[key] = float(v) if np.isfinite(v) else 0.0
+            # Look for 'score' key first, then any numeric value
+            if 'score' in v:
+                val = v['score']
+            elif 'total_score' in v:
+                val = v['total_score']
+            else:
+                # Take first numeric value
+                val = next((x for x in v.values() if isinstance(x, (int, float, np.number))), 0)
+        elif hasattr(v, 'item'):  # numpy scalar
+            val = v.item()
         else:
+            val = v
+            
+        # Ensure it's a clean float
+        try:
+            result[key] = float(val) if np.isfinite(float(val)) else 0.0
+        except (TypeError, ValueError):
             result[key] = 0.0
+            
     return result
 
 
@@ -193,6 +214,24 @@ def main():
     timestamp = datetime.now().isoformat()
     
     def build_record(metrics, final, universe, benchmark):
+        # Extract forecasted returns
+        forecasted = {}
+        if final is not None and 'forecasted_returns' in final:
+            for k, v in final['forecasted_returns'].items():
+                try:
+                    forecasted[str(k)] = float(v) if np.isfinite(float(v)) else 0.0
+                except:
+                    forecasted[str(k)] = 0.0
+        
+        # Extract scores using dedicated function
+        scores = extract_scores(final.get('scores', {})) if final is not None else {}
+        
+        # Debug output
+        print(f"  {universe}: Extracted {len(scores)} scores, {len(forecasted)} forecasts")
+        if scores:
+            sample = list(scores.items())[:3]
+            print(f"  Sample scores: {sample}")
+        
         return {
             "fold": int(args.fold),
             "learning_rate": float(args.lr),
@@ -201,15 +240,15 @@ def main():
             "date": final['date'].strftime('%Y-%m-%d') if final is not None else None,
             "universe": universe,
             "benchmark": benchmark,
-            "sharpe_ratio": metrics['sharpe_ratio'],
-            "annual_return": metrics['annual_return'],
-            "volatility": metrics['volatility'],
-            "max_drawdown": metrics['max_drawdown'],
-            "win_rate": metrics['win_rate'],
-            "total_return": metrics['total_return'],
+            "sharpe_ratio": float(metrics['sharpe_ratio']),
+            "annual_return": float(metrics['annual_return']),
+            "volatility": float(metrics['volatility']),
+            "max_drawdown": float(metrics['max_drawdown']),
+            "win_rate": float(metrics['win_rate']),
+            "total_return": float(metrics['total_return']),
             "top_etfs": [str(x) for x in final['selected_assets']] if final is not None else [],
-            "forecasted_returns": {str(k): float(v) for k, v in final['forecasted_returns'].items()} if final is not None else {},
-            "scores": convert_scores(final['scores']) if final is not None else {},
+            "forecasted_returns": forecasted,
+            "scores": scores,
         }
     
     equity_record = build_record(eq_metrics, eq_final, "equity", eq_bench)
