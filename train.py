@@ -33,7 +33,6 @@ def parse_args():
     parser.add_argument("--fold", type=int, required=True, help="Fold index (seed)")
     parser.add_argument("--lr", type=float, required=True, help="Learning rate")
     parser.add_argument("--model", type=str, required=True, choices=["rf", "xgb", "elasticnet"])
-    # NEW: Optional date range override for CI speed
     parser.add_argument("--start-date", type=str, default=None, help="Override start date (YYYY-MM-DD)")
     parser.add_argument("--end-date", type=str, default=None, help="Override end date (YYYY-MM-DD)")
     return parser.parse_args()
@@ -59,10 +58,23 @@ def safe_metrics(strategy_returns, benchmark_returns):
                                      'max_drawdown', 'win_rate', 'total_return']}
     
     total_return = (1 + r).prod() - 1
+    
+    # FIX: Handle overflow in annual return calculation
     years = len(r) / 252
-    annual_return = (1 + total_return) ** (1 / years) - 1 if years > 0 else 0
+    if years > 0 and np.isfinite(total_return) and total_return > -1:
+        # Clamp total_return to avoid overflow
+        total_return_clamped = np.clip(total_return, -0.9999, 100)  # Max 100x return
+        annual_return = (1 + total_return_clamped) ** (1 / years) - 1
+        if not np.isfinite(annual_return):
+            annual_return = 0.0
+    else:
+        annual_return = 0.0
+    
     volatility = r.std() * np.sqrt(252)
-    sharpe = annual_return / (volatility + 1e-8)
+    sharpe = annual_return / (volatility + 1e-8) if volatility > 0 else 0.0
+    # Clamp Sharpe to reasonable range
+    sharpe = float(np.clip(sharpe, -10, 10))
+    
     cum = (1 + r).cumprod()
     rolling_max = cum.cummax()
     drawdown = (cum - rolling_max) / rolling_max
@@ -70,22 +82,18 @@ def safe_metrics(strategy_returns, benchmark_returns):
     win_rate = (r > 0).mean()
     
     metrics = {
-        'sharpe_ratio': sharpe,
-        'annual_return': annual_return,
-        'volatility': volatility,
-        'max_drawdown': max_drawdown,
-        'win_rate': win_rate,
-        'total_return': total_return,
+        'sharpe_ratio': float(sharpe),
+        'annual_return': float(annual_return),
+        'volatility': float(volatility),
+        'max_drawdown': float(max_drawdown),
+        'win_rate': float(win_rate),
+        'total_return': float(total_return),
     }
     print(f"Metrics computed: Sharpe={sharpe:.3f}, AnnRet={annual_return:.4f}, MaxDD={max_drawdown:.4f}")
     return metrics
 
 def run_backtest_for_universe(assets, benchmark, start_date, end_date, window_size, top_n, max_windows=None):
-    """Run rolling window backtest and return metrics + final prediction.
-    
-    Args:
-        max_windows: If set, limit to first N windows (for CI validation)
-    """
+    """Run rolling window backtest and return metrics + final prediction."""
     print(f"\n--- Backtest for {len(assets)} assets, benchmark={benchmark} ---")
     print(f"Date range: {start_date} to {end_date}, window={window_size}, top_n={top_n}")
     if max_windows:
@@ -96,12 +104,7 @@ def run_backtest_for_universe(assets, benchmark, start_date, end_date, window_si
     print("BacktestEngine created")
     
     print("Running rolling window...")
-    # Pass max_windows to engine if supported
-    if max_windows and hasattr(engine, 'run_rolling_window'):
-        # Monkey-patch or pass parameter if engine supports it
-        results_df = engine.run_rolling_window(start_date, end_date, window_size, top_n, max_windows=max_windows)
-    else:
-        results_df = engine.run_rolling_window(start_date, end_date, window_size, top_n)
+    results_df = engine.run_rolling_window(start_date, end_date, window_size, top_n, max_windows=max_windows)
     print(f"Results DataFrame shape: {results_df.shape}")
     if len(results_df) == 0:
         print("ERROR: No results from backtest")
@@ -194,39 +197,52 @@ def main():
         print("FATAL: FI backtest failed, exiting.")
         sys.exit(1)
     
-    # Build records
+    # FIX: Convert all dict keys to strings for PyArrow compatibility
+    def convert_scores(scores_dict):
+        """Convert scores dict to have string keys for PyArrow."""
+        if not scores_dict:
+            return {}
+        return {str(k): float(v) for k, v in scores_dict.items()}
+    
+    def convert_forecasted_returns(returns_dict):
+        """Convert forecasted returns dict to have string keys."""
+        if not returns_dict:
+            return {}
+        return {str(k): float(v) for k, v in returns_dict.items()}
+    
+    # Build records with explicit type conversion
     equity_record = {
-        "fold": args.fold,
-        "learning_rate": args.lr,
-        "model_type": args.model,
+        "fold": int(args.fold),
+        "learning_rate": float(args.lr),
+        "model_type": str(args.model),
         "timestamp": datetime.now().isoformat(),
         "date": eq_final['date'].strftime('%Y-%m-%d') if eq_final is not None else None,
-        "sharpe_ratio": eq_metrics['sharpe_ratio'],
-        "annual_return": eq_metrics['annual_return'],
-        "volatility": eq_metrics['volatility'],
-        "max_drawdown": eq_metrics['max_drawdown'],
-        "win_rate": eq_metrics['win_rate'],
-        "total_return": eq_metrics['total_return'],
-        "top_etfs": eq_final['selected_assets'] if eq_final is not None else [],
-        "forecasted_returns": eq_final['forecasted_returns'] if eq_final is not None else {},
-        "scores": eq_final['scores'] if eq_final is not None else {},
+        "sharpe_ratio": float(eq_metrics['sharpe_ratio']),
+        "annual_return": float(eq_metrics['annual_return']),
+        "volatility": float(eq_metrics['volatility']),
+        "max_drawdown": float(eq_metrics['max_drawdown']),
+        "win_rate": float(eq_metrics['win_rate']),
+        "total_return": float(eq_metrics['total_return']),
+        "top_etfs": [str(x) for x in eq_final['selected_assets']] if eq_final is not None else [],
+        "forecasted_returns": convert_forecasted_returns(eq_final['forecasted_returns']) if eq_final is not None else {},
+        "scores": convert_scores(eq_final['scores']) if eq_final is not None else {},
     }
     
     fi_record = {
-        "fold": args.fold,
-        "learning_rate": args.lr,
-        "model_type": args.model,
+        "fold": int(args.fold),
+        "learning_rate": float(args.lr),
+        "model_type": str(args.model),
         "timestamp": datetime.now().isoformat(),
         "date": fi_final['date'].strftime('%Y-%m-%d') if fi_final is not None else None,
-        "sharpe_ratio": fi_metrics['sharpe_ratio'],
-        "annual_return": fi_metrics['annual_return'],
-        "volatility": fi_metrics['volatility'],
-        "max_drawdown": fi_metrics['max_drawdown'],
-        "win_rate": fi_metrics['win_rate'],
-        "total_return": fi_metrics['total_return'],
-        "top_etfs": fi_final['selected_assets'] if fi_final is not None else [],
-        "forecasted_returns": fi_final['forecasted_returns'] if fi_final is not None else {},
-        "scores": fi_final['scores'] if fi_final is not None else {},
+        "sharpe_ratio": float(fi_metrics['sharpe_ratio']),
+        "annual_return": float(fi_metrics['annual_return']),
+        "volatility": float(fi_metrics['volatility']),
+        "max_drawdown": float(fi_metrics['max_drawdown']),
+        "win_rate": float(fi_metrics['win_rate']),
+        "total_return": float(fi_metrics['total_return']),
+        "top_etfs": [str(x) for x in fi_final['selected_assets']] if fi_final is not None else [],
+        "forecasted_returns": convert_forecasted_returns(fi_final['forecasted_returns']) if fi_final is not None else {},
+        "scores": convert_scores(fi_final['scores']) if fi_final is not None else {},
     }
     
     token = os.getenv("HF_TOKEN")
