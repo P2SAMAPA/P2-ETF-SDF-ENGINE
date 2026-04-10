@@ -1,312 +1,202 @@
-#!/usr/bin/env python3
-"""
-train.py - Parallel matrix training with backtest metrics
-Outputs two Parquet files: equity_results.parquet and fi_results.parquet
-"""
-
-import os
-import sys
-import argparse
-import time
-import warnings
-import numpy as np
+import streamlit as st
 import pandas as pd
+import numpy as np
+import os
 import json
+import shutil
 from datetime import datetime
-from io import BytesIO
+from pandas.tseries.offsets import CustomBusinessDay
+from pandas.tseries.holiday import USFederalHolidayCalendar
+from huggingface_hub import hf_hub_download
 
-from huggingface_hub import HfApi
-from datasets import Dataset
+st.set_page_config(page_title="SDF Engine", layout="wide")
 
-from configs import CONFIG
-from backtest_engine import BacktestEngine
-
-warnings.filterwarnings("ignore", category=UserWarning, module="statsmodels.tsa.base.tsa_model")
-
-print("=" * 60)
-print("train.py started")
-print("=" * 60)
-sys.stdout.flush()
-
-
-def parse_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--fold", type=int, required=True)
-    parser.add_argument("--lr", type=float, required=True)
-    parser.add_argument("--model", type=str, required=True, choices=["rf", "xgb", "elasticnet"])
-    parser.add_argument("--start-date", type=str, default=None)
-    parser.add_argument("--end-date", type=str, default=None)
-    return parser.parse_args()
-
-
-def override_config(lr: float):
-    CONFIG['sdf_model']['signal']['residual_vol_penalty'] = lr
-    CONFIG['sdf_model']['signal']['factor_exposure_weight'] = lr * 3
-    print(f"Config: residual_vol_penalty={lr}, factor_exposure_weight={lr*3}")
-
-
-def safe_metrics(strategy_returns, benchmark_returns):
-    """Compute metrics with overflow protection."""
-    print("Computing performance metrics...")
-    
-    if len(strategy_returns) == 0:
-        print("WARNING: Empty strategy returns")
-        return {k: 0.0 for k in ['sharpe_ratio', 'annual_return', 'volatility',
-                                 'max_drawdown', 'win_rate', 'total_return']}
-    
-    common_idx = strategy_returns.index.intersection(benchmark_returns.index)
-    r = strategy_returns.loc[common_idx]
-    
-    if len(r) == 0:
-        print("WARNING: No overlapping dates")
-        return {k: 0.0 for k in ['sharpe_ratio', 'annual_return', 'volatility',
-                                 'max_drawdown', 'win_rate', 'total_return']}
-    
-    total_return = (1 + r).prod() - 1
-    total_return = float(np.clip(total_return, -0.9999, 100.0))
-    
-    n_days = len(r)
-    years = n_days / 252.0
-    
-    print(f"  Period: {n_days} days ({years:.3f} years), Total return: {total_return:.4f}")
-    
-    # Annualization
-    if years >= 1.0:
-        annual_return = (1 + total_return) ** (1 / years) - 1
-    elif n_days > 0:
-        annual_return = total_return * (252.0 / n_days)
-    else:
-        annual_return = 0.0
-    
-    if not np.isfinite(annual_return):
-        annual_return = 0.0
-    
-    annual_return = float(np.clip(annual_return, -1.0, 10.0))
-    
-    volatility = r.std() * np.sqrt(252)
-    volatility = float(volatility) if np.isfinite(volatility) else 0.0
-    
-    # FIX: Handle zero volatility properly
-    if volatility > 1e-10:
-        sharpe = annual_return / volatility
-    else:
-        # Zero volatility: risk-free return
-        if annual_return > 0:
-            sharpe = 10.0  # Max Sharpe
-        elif annual_return < 0:
-            sharpe = -10.0  # Min Sharpe
-        else:
-            sharpe = 0.0
-    
-    sharpe = float(np.clip(sharpe, -10, 10))
-    
-    cum = (1 + r).cumprod()
-    rolling_max = cum.cummax()
-    drawdown = (cum - rolling_max) / rolling_max
-    max_drawdown = float(drawdown.min()) if len(drawdown) > 0 else 0.0
-    win_rate = float((r > 0).mean())
-    
-    print(f"  FINAL METRICS: AnnRet={annual_return:.4f} ({annual_return*100:.2f}%), Sharpe={sharpe:.3f}, MaxDD={max_drawdown:.4f} ({max_drawdown*100:.2f}%)")
-    
-    return {
-        'sharpe_ratio': sharpe,
-        'annual_return': annual_return,
-        'volatility': volatility,
-        'max_drawdown': max_drawdown,
-        'win_rate': win_rate,
-        'total_return': total_return,
-    }
-
-
-def run_backtest(assets, benchmark, start_date, end_date, window_size, top_n, max_windows=None):
-    """Run rolling window backtest."""
-    print(f"\nBacktest: {len(assets)} assets, benchmark={benchmark}")
-    print(f"Range: {start_date} to {end_date}, window={window_size}, top_n={top_n}")
-    if max_windows:
-        print(f"CI MODE: {max_windows} windows")
-    sys.stdout.flush()
-    
-    engine = BacktestEngine(assets, benchmark, hf_token=os.getenv("HF_TOKEN"))
-    results_df = engine.run_rolling_window(start_date, end_date, window_size, top_n, max_windows=max_windows)
-    
-    if len(results_df) == 0:
-        print("ERROR: No results")
-        return None, None
-    
-    _, _, benchmark_returns = engine.prepare_data(start_date, end_date)
-    strat_returns = results_df.set_index('date')['strategy_return']
-    
-    print(f"Strategy returns: {len(strat_returns)} periods")
-    print(f"Return stats: min={strat_returns.min():.4f}, max={strat_returns.max():.4f}, mean={strat_returns.mean():.4f}, std={strat_returns.std():.4f}")
-    
-    metrics = safe_metrics(strat_returns, benchmark_returns)
-    final_signals = results_df.iloc[-1] if len(results_df) > 0 else None
-    
-    if final_signals is not None:
-        scores = final_signals.get('scores', {})
-        print(f"Final scores count: {len(scores)}")
-    
-    return metrics, final_signals
-
-
-def save_universe_to_parquet(repo_id, filename, record, token):
-    """
-    Save universe record to HF as Parquet.
-    Appends to existing file or creates new one.
-    """
+# CRITICAL: Clear HF cache to avoid schema conflicts
+cache_dir = os.path.expanduser("~/.cache/huggingface")
+if os.path.exists(cache_dir):
     try:
-        from datasets import load_dataset
-        
-        # Try to load existing
-        try:
-            existing_ds = load_dataset(repo_id, data_files=filename, split="train", token=token)
-            existing_df = existing_ds.to_pandas()
-            print(f"Loaded existing {filename}: {len(existing_df)} rows")
-        except Exception as e:
-            existing_df = pd.DataFrame()
-            print(f"Creating new {filename}: {e}")
-        
-        # Create new row
-        new_df = pd.DataFrame([record])
-        
-        # Combine
-        combined_df = pd.concat([existing_df, new_df], ignore_index=True)
-        
-        # Convert to Dataset
-        ds = Dataset.from_pandas(combined_df)
-        
-        # Save to bytes
-        buffer = BytesIO()
-        ds.to_parquet(buffer)
-        buffer.seek(0)
-        
-        # Upload
-        api = HfApi()
-        api.upload_file(
-            path_or_fileobj=buffer,
-            path_in_repo=filename,
-            repo_id=repo_id,
+        shutil.rmtree(cache_dir)
+        print("Cleared HF cache")
+    except:
+        pass
+
+st.markdown("""
+<style>
+    [data-testid="stSidebar"] {display: none;}
+    .hero-card {background: linear-gradient(135deg, #1E3A5F 0%, #2C5282 100%); border-radius: 20px; padding: 2rem; color: white; margin-bottom: 1rem;}
+    .hero-ticker {font-size: 3rem; font-weight: 800;}
+    .hero-return {font-size: 2rem; font-weight: 600;}
+    .metric-card {background: white; border-radius: 12px; padding: 1rem; text-align: center; box-shadow: 0 2px 8px rgba(0,0,0,0.05);}
+    .metric-value {font-size: 1.8rem; font-weight: 700; color: #1E3A5F;}
+</style>
+""", unsafe_allow_html=True)
+
+
+def get_hf_token():
+    return st.secrets.get("HF_TOKEN") or os.getenv("HF_TOKEN")
+
+
+@st.cache_data(ttl=60)
+def load_best_result(parquet_filename):
+    """Load best result from Parquet with fresh download."""
+    token = get_hf_token()
+    if not token:
+        st.error("HF_TOKEN not found")
+        return None
+    
+    try:
+        # Download fresh (no cache)
+        file_path = hf_hub_download(
+            repo_id="P2SAMAPA/p2-etf-sdf-engine-results",
+            filename=parquet_filename,
             repo_type="dataset",
-            token=token
+            token=token,
+            local_dir=None,  # Use temp
+            force_download=True  # Force fresh download
         )
-        print(f"UPLOADED to {repo_id}/{filename}: {len(combined_df)} total rows")
-        print(f"  Saved metrics: Sharpe={record['sharpe_ratio']}, AnnRet={record['annual_return']}, MaxDD={record['max_drawdown']}")
-        return True
+        
+        # Read with pandas
+        df = pd.read_parquet(file_path)
+        
+        if len(df) == 0:
+            return None
+        
+        # Debug info
+        st.write(f"Loaded {len(df)} rows from {parquet_filename}")
+        st.write(f"Columns: {list(df.columns)}")
+        st.write(f"Sample metrics: {df[['sharpe_ratio', 'annual_return']].head()}")
+        
+        # Find best Sharpe
+        best_idx = df['sharpe_ratio'].idxmax()
+        best = df.loc[best_idx].to_dict()
+        
+        # Parse JSON strings
+        best['top_etfs'] = json.loads(best.get('top_etfs', '[]'))
+        best['forecasted_returns'] = json.loads(best.get('forecasted_returns', '{}'))
+        best['scores'] = json.loads(best.get('scores', '{}'))
+        
+        return best
         
     except Exception as e:
-        print(f"Error saving: {e}")
+        st.error(f"Error: {str(e)}")
         import traceback
-        traceback.print_exc()
-        return False
+        st.code(traceback.format_exc())
+        return None
+
+
+def get_next_trading_date():
+    us_cal = USFederalHolidayCalendar()
+    nyse = CustomBusinessDay(calendar=us_cal)
+    return (datetime.now().date() + nyse).strftime('%Y-%m-%d')
+
+
+def render_universe(title, parquet_file, benchmark):
+    st.header(title)
+    st.markdown(f"**Benchmark:** {benchmark}")
+    
+    data = load_best_result(parquet_file)
+    
+    if not data:
+        st.warning("No data found")
+        return
+    
+    # Show raw data for debugging
+    with st.expander("Debug: Raw Data"):
+        st.json({k: v for k, v in data.items() if k not in ['forecasted_returns', 'scores']})
+    
+    # Extract
+    top_etfs = data.get('top_etfs', [])
+    forecasted = data.get('forecasted_returns', {})
+    scores = data.get('scores', {})
+    
+    # Get metrics
+    sharpe = float(data.get('sharpe_ratio', 0))
+    ann_ret = float(data.get('annual_return', 0))
+    max_dd = float(data.get('max_drawdown', 0))
+    
+    # Validate
+    if not np.isfinite(sharpe):
+        sharpe = 0.0
+    if not np.isfinite(ann_ret):
+        ann_ret = 0.0
+    if not np.isfinite(max_dd):
+        max_dd = 0.0
+    
+    # Hero card logic
+    if forecasted:
+        sorted_etfs = sorted(forecasted.items(), key=lambda x: x[1], reverse=True)
+        top, top_ret = sorted_etfs[0]
+        top_pct = float(top_ret) * 100 if np.isfinite(float(top_ret)) else 0
+        
+        sec = sorted_etfs[1][0] if len(sorted_etfs) > 1 else None
+        sec_pct = float(forecasted.get(sec, 0)) * 100 if sec else 0
+    else:
+        top, top_pct = "N/A", 0
+        sec, sec_pct = None, 0
+    
+    if top != "N/A":
+        col1, col2 = st.columns([2, 1])
+        
+        with col1:
+            st.markdown(f"""
+            <div class="hero-card">
+                <div class="hero-ticker">{top}</div>
+                <div class="hero-return">+{top_pct:.3f}%</div>
+                <div>Expected Return – {get_next_trading_date()}</div>
+            </div>
+            """, unsafe_allow_html=True)
+            if sec:
+                st.markdown(f"📈 **{sec}** +{sec_pct:.3f}%")
+        
+        with col2:
+            st.markdown(f"""
+            <div class="metric-card">
+                <div class="metric-value">{ann_ret*100:.1f}%</div>
+                <div>Annual Return</div>
+            </div>
+            <div class="metric-card" style="margin-top:12px">
+                <div class="metric-value">{sharpe:.2f}</div>
+                <div>Sharpe Ratio</div>
+            </div>
+            <div class="metric-card" style="margin-top:12px">
+                <div class="metric-value">{-max_dd*100:.1f}%</div>
+                <div>Max Drawdown</div>
+            </div>
+            """, unsafe_allow_html=True)
+    else:
+        st.info("No predictions")
+        return
+    
+    # Rankings
+    st.markdown("---")
+    st.subheader("All ETF Rankings")
+    
+    if forecasted:
+        rows = []
+        for etf, ret in forecasted.items():
+            ret_val = float(ret) * 100 if np.isfinite(float(ret)) else 0
+            score_val = float(scores.get(etf, 0))
+            rows.append({"ETF": etf, "Expected Return (%)": ret_val, "Score": score_val})
+        
+        if rows:
+            df = pd.DataFrame(rows)
+            st.dataframe(df.sort_values("Expected Return (%)", ascending=False), 
+                        use_container_width=True, hide_index=True)
 
 
 def main():
-    args = parse_args()
-    print(f"Args: fold={args.fold}, lr={args.lr}, model={args.model}")
+    st.title("SDF Engine – ETF Signal Generator")
     
-    is_ci = os.getenv('CI_MODE', '').lower() == 'true'
-    max_windows = os.getenv('MAX_WINDOWS')
-    max_windows = int(max_windows) if max_windows else None
+    tab1, tab2 = st.tabs(["📈 Equity ETFs", "🏦 FI & Commodities"])
     
-    override_config(args.lr)
-    np.random.seed(args.fold)
+    with tab1:
+        render_universe("US Equity ETFs", "equity_results.parquet", "SPY")
     
-    # Date setup
-    start_date = args.start_date or CONFIG['backtest']['start_date']
-    end_date = args.end_date or CONFIG['backtest']['end_date']
+    with tab2:
+        render_universe("Fixed Income & Commodities", "fi_results.parquet", "AGG")
     
-    if is_ci and not args.start_date:
-        start_date = '2024-01-01'
-        print(f"CI MODE: Using {start_date}")
-    
-    window_size = CONFIG['backtest']['window_strategies']['rolling']['window_size']
-    top_n = CONFIG['backtest']['rebalance']['top_n']
-    
-    # Equity
-    eq_assets = CONFIG['universes']['equity']['assets']
-    eq_bench = CONFIG['universes']['equity']['benchmark']
-    eq_metrics, eq_final = run_backtest(eq_assets, eq_bench, start_date, end_date, window_size, top_n, max_windows)
-    if eq_metrics is None:
-        sys.exit(1)
-    
-    # FI/Commodity
-    fi_assets = CONFIG['universes']['fi_commodities']['assets']
-    fi_bench = CONFIG['universes']['fi_commodities']['benchmark']
-    fi_metrics, fi_final = run_backtest(fi_assets, fi_bench, start_date, end_date, window_size, top_n, max_windows)
-    if fi_metrics is None:
-        sys.exit(1)
-    
-    # Build records
-    timestamp = datetime.now().isoformat()
-    
-    def build_record(metrics, final, universe, benchmark):
-        # Convert dicts to JSON strings for Parquet compatibility
-        forecasted = final.get('forecasted_returns', {}) if final is not None else {}
-        scores = final.get('scores', {}) if final is not None else {}
-        
-        # Ensure simple float values
-        clean_scores = {}
-        for k, v in scores.items():
-            try:
-                clean_scores[str(k)] = float(v) if isinstance(v, (int, float, np.number)) and np.isfinite(v) else 0.0
-            except:
-                clean_scores[str(k)] = 0.0
-        
-        clean_forecasted = {}
-        for k, v in forecasted.items():
-            try:
-                clean_forecasted[str(k)] = float(v) if isinstance(v, (int, float, np.number)) and np.isfinite(v) else 0.0
-            except:
-                clean_forecasted[str(k)] = 0.0
-        
-        print(f"Building record for {universe}:")
-        print(f"  Sharpe: {metrics['sharpe_ratio']}")
-        print(f"  AnnRet: {metrics['annual_return']}")
-        print(f"  MaxDD: {metrics['max_drawdown']}")
-        
-        return {
-            "fold": int(args.fold),
-            "learning_rate": float(args.lr),
-            "model_type": str(args.model),
-            "timestamp": timestamp,
-            "date": final['date'].strftime('%Y-%m-%d') if final is not None else None,
-            "benchmark": str(benchmark),
-            "sharpe_ratio": float(metrics['sharpe_ratio']),
-            "annual_return": float(metrics['annual_return']),
-            "volatility": float(metrics['volatility']),
-            "max_drawdown": float(metrics['max_drawdown']),
-            "win_rate": float(metrics['win_rate']),
-            "total_return": float(metrics['total_return']),
-            "top_etfs": json.dumps([str(x) for x in final['selected_assets']]) if final is not None else "[]",
-            "forecasted_returns": json.dumps(clean_forecasted),
-            "scores": json.dumps(clean_scores),
-        }
-    
-    equity_record = build_record(eq_metrics, eq_final, "equity", eq_bench)
-    fi_record = build_record(fi_metrics, fi_final, "fi_commodity", fi_bench)
-    
-    # Upload
-    token = os.getenv("HF_TOKEN")
-    if not token:
-        print("ERROR: HF_TOKEN not set")
-        sys.exit(1)
-    
-    repo_id = "P2SAMAPA/p2-etf-sdf-engine-results"
-    
-    # Create repo if needed
-    api = HfApi()
-    try:
-        api.create_repo(repo_id, repo_type="dataset", exist_ok=True, token=token)
-    except:
-        pass
-    
-    print("\n--- Saving Equity Results ---")
-    save_universe_to_parquet(repo_id, "equity_results.parquet", equity_record, token)
-    
-    print("\n--- Saving FI Results ---")
-    save_universe_to_parquet(repo_id, "fi_results.parquet", fi_record, token)
-    
-    print("\n=== Training complete ===")
+    st.markdown(f'<div style="text-align:center; margin-top:2rem; color:#718096;">Updated: {datetime.now().strftime("%d %b %Y %H:%M")}</div>', 
+                unsafe_allow_html=True)
 
 
 if __name__ == "__main__":
