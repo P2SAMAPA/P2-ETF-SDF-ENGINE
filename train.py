@@ -2,6 +2,7 @@
 """
 train.py - Parallel matrix training with backtest metrics
 Includes detailed debug logging to trace execution.
+CI Mode: Set CI_MODE=true and MAX_WINDOWS=N for quick validation
 """
 
 import os
@@ -32,6 +33,9 @@ def parse_args():
     parser.add_argument("--fold", type=int, required=True, help="Fold index (seed)")
     parser.add_argument("--lr", type=float, required=True, help="Learning rate")
     parser.add_argument("--model", type=str, required=True, choices=["rf", "xgb", "elasticnet"])
+    # NEW: Optional date range override for CI speed
+    parser.add_argument("--start-date", type=str, default=None, help="Override start date (YYYY-MM-DD)")
+    parser.add_argument("--end-date", type=str, default=None, help="Override end date (YYYY-MM-DD)")
     return parser.parse_args()
 
 def override_config(lr: float):
@@ -76,17 +80,28 @@ def safe_metrics(strategy_returns, benchmark_returns):
     print(f"Metrics computed: Sharpe={sharpe:.3f}, AnnRet={annual_return:.4f}, MaxDD={max_drawdown:.4f}")
     return metrics
 
-def run_backtest_for_universe(assets, benchmark, start_date, end_date, window_size, top_n):
-    """Run rolling window backtest and return metrics + final prediction."""
+def run_backtest_for_universe(assets, benchmark, start_date, end_date, window_size, top_n, max_windows=None):
+    """Run rolling window backtest and return metrics + final prediction.
+    
+    Args:
+        max_windows: If set, limit to first N windows (for CI validation)
+    """
     print(f"\n--- Backtest for {len(assets)} assets, benchmark={benchmark} ---")
     print(f"Date range: {start_date} to {end_date}, window={window_size}, top_n={top_n}")
+    if max_windows:
+        print(f"CI MODE: Limiting to first {max_windows} windows")
     sys.stdout.flush()
     
     engine = BacktestEngine(assets, benchmark, hf_token=os.getenv("HF_TOKEN"))
     print("BacktestEngine created")
     
     print("Running rolling window...")
-    results_df = engine.run_rolling_window(start_date, end_date, window_size, top_n)
+    # Pass max_windows to engine if supported
+    if max_windows and hasattr(engine, 'run_rolling_window'):
+        # Monkey-patch or pass parameter if engine supports it
+        results_df = engine.run_rolling_window(start_date, end_date, window_size, top_n, max_windows=max_windows)
+    else:
+        results_df = engine.run_rolling_window(start_date, end_date, window_size, top_n)
     print(f"Results DataFrame shape: {results_df.shape}")
     if len(results_df) == 0:
         print("ERROR: No results from backtest")
@@ -133,12 +148,25 @@ def main():
     print(f"Arguments: fold={args.fold}, lr={args.lr}, model={args.model}")
     sys.stdout.flush()
     
+    # CI MODE DETECTION
+    is_ci = os.getenv('CI_MODE', '').lower() == 'true' or os.getenv('GITHUB_ACTIONS', '').lower() == 'true'
+    max_windows = os.getenv('MAX_WINDOWS')
+    if max_windows:
+        max_windows = int(max_windows)
+        print(f"CI MODE: MAX_WINDOWS set to {max_windows}")
+    
     override_config(args.lr)
     np.random.seed(args.fold)
     
-    # Get config values
-    start_date = CONFIG['backtest']['start_date']
-    end_date   = CONFIG['backtest']['end_date']
+    # Get config values with CI overrides
+    start_date = args.start_date or CONFIG['backtest']['start_date']
+    end_date = args.end_date or CONFIG['backtest']['end_date']
+    
+    # CI OPTIMIZATION: If no explicit dates but CI mode, use last 2 years only
+    if is_ci and not args.start_date and not args.end_date:
+        start_date = '2024-01-01'  # Last ~1.5 years instead of 2008
+        print(f"CI MODE: Auto-adjusted start_date to {start_date} for speed")
+    
     window_size = CONFIG['backtest']['window_strategies']['rolling']['window_size']
     top_n = CONFIG['backtest']['rebalance']['top_n']
     print(f"Backtest config: {start_date} -> {end_date}, window={window_size}, top_n={top_n}")
@@ -148,7 +176,9 @@ def main():
     eq_assets = CONFIG['universes']['equity']['assets']
     eq_bench = CONFIG['universes']['equity']['benchmark']
     print(f"\nProcessing EQUITY universe with {len(eq_assets)} assets")
-    eq_metrics, eq_final = run_backtest_for_universe(eq_assets, eq_bench, start_date, end_date, window_size, top_n)
+    eq_metrics, eq_final = run_backtest_for_universe(
+        eq_assets, eq_bench, start_date, end_date, window_size, top_n, max_windows
+    )
     if eq_metrics is None:
         print("FATAL: Equity backtest failed, exiting.")
         sys.exit(1)
@@ -157,7 +187,9 @@ def main():
     fi_assets = CONFIG['universes']['fi_commodities']['assets']
     fi_bench = CONFIG['universes']['fi_commodities']['benchmark']
     print(f"\nProcessing FI/COMMODITY universe with {len(fi_assets)} assets")
-    fi_metrics, fi_final = run_backtest_for_universe(fi_assets, fi_bench, start_date, end_date, window_size, top_n)
+    fi_metrics, fi_final = run_backtest_for_universe(
+        fi_assets, fi_bench, start_date, end_date, window_size, top_n, max_windows
+    )
     if fi_metrics is None:
         print("FATAL: FI backtest failed, exiting.")
         sys.exit(1)
