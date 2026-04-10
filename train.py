@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
 train.py - Parallel matrix training with backtest metrics
-Includes detailed debug logging to trace execution.
-CI Mode: Set CI_MODE=true and MAX_WINDOWS=N for quick validation
+Stores results in P2SAMAPA/p2-etf-sdf-engine-results with separate JSON files for equity and FI
 """
 
 import os
@@ -14,8 +13,10 @@ import numpy as np
 import pandas as pd
 import json
 from datetime import datetime
+from io import BytesIO
 
-from datasets import Dataset
+from datasets import Dataset, Features, Value, Sequence
+from huggingface_hub import HfApi, HfFolder
 from huggingface_hub.errors import HfHubHTTPError
 
 from configs import CONFIG
@@ -63,8 +64,7 @@ def safe_metrics(strategy_returns, benchmark_returns):
     # FIX: Handle overflow in annual return calculation
     years = len(r) / 252
     if years > 0 and np.isfinite(total_return) and total_return > -1:
-        # Clamp total_return to avoid overflow
-        total_return_clamped = np.clip(total_return, -0.9999, 100)  # Max 100x return
+        total_return_clamped = np.clip(total_return, -0.9999, 100)
         annual_return = (1 + total_return_clamped) ** (1 / years) - 1
         if not np.isfinite(annual_return):
             annual_return = 0.0
@@ -73,7 +73,6 @@ def safe_metrics(strategy_returns, benchmark_returns):
     
     volatility = r.std() * np.sqrt(252)
     sharpe = annual_return / (volatility + 1e-8) if volatility > 0 else 0.0
-    # Clamp Sharpe to reasonable range
     sharpe = float(np.clip(sharpe, -10, 10))
     
     cum = (1 + r).cumprod()
@@ -125,25 +124,63 @@ def run_backtest_for_universe(assets, benchmark, start_date, end_date, window_si
     
     return metrics, final_signals
 
-def push_with_retry(dataset, dataset_name, token, max_retries=5):
-    """Push dataset with retry on 409/412."""
+def convert_scores(scores_dict):
+    """Convert scores dict to have string keys and scalar values."""
+    if not scores_dict:
+        return {}
+    
+    result = {}
+    for k, v in scores_dict.items():
+        key = str(k)
+        if isinstance(v, dict):
+            if 'score' in v:
+                result[key] = float(v['score'])
+            else:
+                for sub_v in v.values():
+                    if isinstance(sub_v, (int, float)):
+                        result[key] = float(sub_v)
+                        break
+                else:
+                    result[key] = 0.0
+        elif isinstance(v, (list, tuple)):
+            result[key] = float(v[0]) if len(v) > 0 else 0.0
+        elif isinstance(v, (int, float)):
+            result[key] = float(v)
+        else:
+            result[key] = 0.0
+    return result
+
+def convert_forecasted_returns(returns_dict):
+    """Convert forecasted returns dict to have string keys."""
+    if not returns_dict:
+        return {}
+    return {str(k): float(v) for k, v in returns_dict.items()}
+
+def save_json_to_hf(api, repo_id, filename, data, token, max_retries=5):
+    """Save JSON file directly to HF dataset repo."""
+    json_str = json.dumps(data, indent=2, default=str)
+    json_bytes = json_str.encode('utf-8')
+    
     for attempt in range(max_retries):
         try:
-            dataset.push_to_hub(dataset_name, token=token, split="train")
-            print(f"Successfully pushed to {dataset_name}")
+            # Upload as bytes
+            api.upload_file(
+                path_or_fileobj=BytesIO(json_bytes),
+                path_in_repo=filename,
+                repo_id=repo_id,
+                repo_type="dataset",
+                token=token
+            )
+            print(f"Successfully saved {filename} to {repo_id}")
             return True
-        except HfHubHTTPError as e:
-            if e.response.status_code in (409, 412):
+        except Exception as e:
+            if attempt < max_retries - 1:
                 wait = 2 ** attempt
-                print(f"Conflict {e.response.status_code}, retrying in {wait}s...")
+                print(f"Error uploading {filename}, retrying in {wait}s: {e}")
                 time.sleep(wait)
             else:
-                print(f"HTTP error {e.response.status_code}: {e}")
+                print(f"Failed to upload {filename} after {max_retries} attempts: {e}")
                 raise
-        except Exception as e:
-            print(f"Unexpected error: {e}")
-            raise
-    print(f"Failed to push to {dataset_name} after {max_retries} attempts")
     return False
 
 def main():
@@ -166,9 +203,8 @@ def main():
     start_date = args.start_date or CONFIG['backtest']['start_date']
     end_date = args.end_date or CONFIG['backtest']['end_date']
     
-    # CI OPTIMIZATION: If no explicit dates but CI mode, use last 2 years only
     if is_ci and not args.start_date and not args.end_date:
-        start_date = '2024-01-01'  # Last ~1.5 years instead of 2008
+        start_date = '2024-01-01'
         print(f"CI MODE: Auto-adjusted start_date to {start_date} for speed")
     
     window_size = CONFIG['backtest']['window_strategies']['rolling']['window_size']
@@ -198,49 +234,17 @@ def main():
         print("FATAL: FI backtest failed, exiting.")
         sys.exit(1)
     
-    # FIX: Convert all dict keys to strings for PyArrow compatibility
-    # Handle nested dictionaries by flattening or serializing
-    def convert_scores(scores_dict):
-        """Convert scores dict to have string keys and scalar values for PyArrow."""
-        if not scores_dict:
-            return {}
-        
-        result = {}
-        for k, v in scores_dict.items():
-            key = str(k)
-            if isinstance(v, dict):
-                # Flatten nested dict - take the 'score' value if it exists, else sum values
-                if 'score' in v:
-                    result[key] = float(v['score'])
-                else:
-                    # Take the first numeric value found
-                    for sub_v in v.values():
-                        if isinstance(sub_v, (int, float)):
-                            result[key] = float(sub_v)
-                            break
-                    else:
-                        result[key] = 0.0
-            elif isinstance(v, (list, tuple)):
-                result[key] = float(v[0]) if len(v) > 0 else 0.0
-            elif isinstance(v, (int, float)):
-                result[key] = float(v)
-            else:
-                result[key] = 0.0
-        return result
+    # Build JSON records
+    timestamp = datetime.now().isoformat()
     
-    def convert_forecasted_returns(returns_dict):
-        """Convert forecasted returns dict to have string keys."""
-        if not returns_dict:
-            return {}
-        return {str(k): float(v) for k, v in returns_dict.items()}
-
-    # Build records with explicit type conversion
     equity_record = {
         "fold": int(args.fold),
         "learning_rate": float(args.lr),
         "model_type": str(args.model),
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": timestamp,
         "date": eq_final['date'].strftime('%Y-%m-%d') if eq_final is not None else None,
+        "universe": "equity",
+        "benchmark": eq_bench,
         "sharpe_ratio": float(eq_metrics['sharpe_ratio']),
         "annual_return": float(eq_metrics['annual_return']),
         "volatility": float(eq_metrics['volatility']),
@@ -256,8 +260,10 @@ def main():
         "fold": int(args.fold),
         "learning_rate": float(args.lr),
         "model_type": str(args.model),
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": timestamp,
         "date": fi_final['date'].strftime('%Y-%m-%d') if fi_final is not None else None,
+        "universe": "fi_commodity",
+        "benchmark": fi_bench,
         "sharpe_ratio": float(fi_metrics['sharpe_ratio']),
         "annual_return": float(fi_metrics['annual_return']),
         "volatility": float(fi_metrics['volatility']),
@@ -274,13 +280,24 @@ def main():
         print("ERROR: HF_TOKEN environment variable not set")
         sys.exit(1)
     
-    print("\n--- Pushing Equity Results ---")
-    eq_ds = Dataset.from_pandas(pd.DataFrame([equity_record]))
-    push_with_retry(eq_ds, "P2SAMAPA/p2-etf-sdf-engine-results-equity", token)
+    # Initialize HF API
+    api = HfApi()
+    repo_id = "P2SAMAPA/p2-etf-sdf-engine-results"
     
-    print("\n--- Pushing FI Results ---")
-    fi_ds = Dataset.from_pandas(pd.DataFrame([fi_record]))
-    push_with_retry(fi_ds, "P2SAMAPA/p2-etf-sdf-engine-results-fi", token)
+    # Create repo if doesn't exist
+    try:
+        api.create_repo(repo_id, repo_type="dataset", exist_ok=True, token=token)
+    except Exception as e:
+        print(f"Repo creation warning (may already exist): {e}")
+    
+    # Save as separate JSON files
+    print("\n--- Saving Equity Results to HF ---")
+    equity_filename = f"equity_fold{args.fold}_lr{args.lr}_{args.model}.json"
+    save_json_to_hf(api, repo_id, equity_filename, equity_record, token)
+    
+    print("\n--- Saving FI Results to HF ---")
+    fi_filename = f"fi_fold{args.fold}_lr{args.lr}_{args.model}.json"
+    save_json_to_hf(api, repo_id, fi_filename, fi_record, token)
     
     print("\n=== Training completed successfully ===")
 
