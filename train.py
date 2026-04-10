@@ -10,6 +10,8 @@ import time
 import pandas as pd
 import numpy as np
 from datetime import datetime
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="statsmodels.tsa.base.tsa_model")
 
 from datasets import Dataset
 from huggingface_hub.errors import HfHubHTTPError
