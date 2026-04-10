@@ -27,21 +27,20 @@ def get_hf_token():
 
 
 @st.cache_data(ttl=300)
-def load_best_result(universe_type):
-    """Load best result from Parquet dataset."""
+def load_best_result_from_parquet(parquet_file):
+    """Load best result from specific Parquet file."""
     token = get_hf_token()
     if not token:
         return None
     
     try:
-        ds = load_dataset("P2SAMAPA/p2-etf-sdf-engine-results", split="train", token=token)
+        ds = load_dataset(
+            "P2SAMAPA/p2-etf-sdf-engine-results", 
+            data_files=parquet_file,
+            split="train", 
+            token=token
+        )
         df = ds.to_pandas()
-        
-        if len(df) == 0:
-            return None
-        
-        # Filter by universe
-        df = df[df['universe'] == universe_type]
         
         if len(df) == 0:
             return None
@@ -58,7 +57,7 @@ def load_best_result(universe_type):
         return best
         
     except Exception as e:
-        st.error(f"Load error: {e}")
+        st.error(f"Load error for {parquet_file}: {e}")
         return None
 
 
@@ -68,11 +67,11 @@ def get_next_trading_date():
     return (datetime.now().date() + nyse).strftime('%Y-%m-%d')
 
 
-def render_universe(title, universe_type, benchmark):
+def render_universe(title, parquet_file, benchmark):
     st.header(title)
     st.markdown(f"**Benchmark:** {benchmark}")
     
-    data = load_best_result(universe_type)
+    data = load_best_result_from_parquet(parquet_file)
     if not data:
         st.warning("No results found.")
         return
@@ -146,9 +145,9 @@ def main():
     st.title("SDF Engine – ETF Signal Generator")
     tab1, tab2 = st.tabs(["📈 Equity ETFs", "🏦 FI & Commodities"])
     with tab1:
-        render_universe("US Equity ETFs", "equity", "SPY")
+        render_universe("US Equity ETFs", "equity_results.parquet", "SPY")
     with tab2:
-        render_universe("Fixed Income & Commodities", "fi_commodity", "AGG")
+        render_universe("Fixed Income & Commodities", "fi_results.parquet", "AGG")
     st.markdown(f'<div style="text-align:center; margin-top:2rem; color:#718096;">Last updated: {datetime.now().strftime("%d %b %Y")}</div>', unsafe_allow_html=True)
 
 
