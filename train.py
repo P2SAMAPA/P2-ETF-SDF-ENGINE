@@ -12,6 +12,7 @@ import time
 import warnings
 import numpy as np
 import pandas as pd
+import json
 from datetime import datetime
 
 from datasets import Dataset
@@ -198,18 +199,41 @@ def main():
         sys.exit(1)
     
     # FIX: Convert all dict keys to strings for PyArrow compatibility
+    # Handle nested dictionaries by flattening or serializing
     def convert_scores(scores_dict):
-        """Convert scores dict to have string keys for PyArrow."""
+        """Convert scores dict to have string keys and scalar values for PyArrow."""
         if not scores_dict:
             return {}
-        return {str(k): float(v) for k, v in scores_dict.items()}
+        
+        result = {}
+        for k, v in scores_dict.items():
+            key = str(k)
+            if isinstance(v, dict):
+                # Flatten nested dict - take the 'score' value if it exists, else sum values
+                if 'score' in v:
+                    result[key] = float(v['score'])
+                else:
+                    # Take the first numeric value found
+                    for sub_v in v.values():
+                        if isinstance(sub_v, (int, float)):
+                            result[key] = float(sub_v)
+                            break
+                    else:
+                        result[key] = 0.0
+            elif isinstance(v, (list, tuple)):
+                result[key] = float(v[0]) if len(v) > 0 else 0.0
+            elif isinstance(v, (int, float)):
+                result[key] = float(v)
+            else:
+                result[key] = 0.0
+        return result
     
     def convert_forecasted_returns(returns_dict):
         """Convert forecasted returns dict to have string keys."""
         if not returns_dict:
             return {}
         return {str(k): float(v) for k, v in returns_dict.items()}
-    
+
     # Build records with explicit type conversion
     equity_record = {
         "fold": int(args.fold),
