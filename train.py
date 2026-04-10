@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 train.py - Parallel matrix training with backtest metrics
-Outputs Parquet files to P2SAMAPA/p2-etf-sdf-engine-results
+Outputs two Parquet files: equity_results.parquet and fi_results.parquet
 """
 
 import os
@@ -137,21 +137,22 @@ def run_backtest(assets, benchmark, start_date, end_date, window_size, top_n, ma
     return metrics, final_signals
 
 
-def save_to_hf_parquet(repo_id, record, token):
+def save_universe_to_parquet(repo_id, filename, record, token):
     """
-    Save record to HF as Parquet dataset.
-    Appends to existing dataset or creates new one.
+    Save universe record to HF as Parquet.
+    Appends to existing file or creates new one.
     """
     try:
-        # Try to load existing dataset
         from datasets import load_dataset
+        
+        # Try to load existing
         try:
-            existing_ds = load_dataset(repo_id, split="train", token=token)
+            existing_ds = load_dataset(repo_id, data_files=filename, split="train", token=token)
             existing_df = existing_ds.to_pandas()
-            print(f"Loaded existing dataset: {len(existing_df)} rows")
+            print(f"Loaded existing {filename}: {len(existing_df)} rows")
         except:
             existing_df = pd.DataFrame()
-            print("Creating new dataset")
+            print(f"Creating new {filename}")
         
         # Create new row
         new_df = pd.DataFrame([record])
@@ -159,14 +160,28 @@ def save_to_hf_parquet(repo_id, record, token):
         # Combine
         combined_df = pd.concat([existing_df, new_df], ignore_index=True)
         
-        # Convert to Dataset and push
+        # Convert to Dataset
         ds = Dataset.from_pandas(combined_df)
-        ds.push_to_hub(repo_id, token=token, split="train")
-        print(f"Saved to {repo_id}: {len(combined_df)} total rows")
+        
+        # Save to bytes
+        buffer = BytesIO()
+        ds.to_parquet(buffer)
+        buffer.seek(0)
+        
+        # Upload
+        api = HfApi()
+        api.upload_file(
+            path_or_fileobj=buffer,
+            path_in_repo=filename,
+            repo_id=repo_id,
+            repo_type="dataset",
+            token=token
+        )
+        print(f"Saved to {repo_id}/{filename}: {len(combined_df)} total rows")
         return True
         
     except Exception as e:
-        print(f"Error saving to HF: {e}")
+        print(f"Error saving: {e}")
         import traceback
         traceback.print_exc()
         return False
@@ -217,10 +232,19 @@ def main():
         scores = final.get('scores', {}) if final is not None else {}
         
         # Ensure simple float values
-        clean_scores = {str(k): float(v) if isinstance(v, (int, float, np.number)) and np.isfinite(v) else 0.0 
-                       for k, v in scores.items()}
-        clean_forecasted = {str(k): float(v) if isinstance(v, (int, float, np.number)) and np.isfinite(v) else 0.0 
-                          for k, v in forecasted.items()}
+        clean_scores = {}
+        for k, v in scores.items():
+            try:
+                clean_scores[str(k)] = float(v) if isinstance(v, (int, float, np.number)) and np.isfinite(v) else 0.0
+            except:
+                clean_scores[str(k)] = 0.0
+        
+        clean_forecasted = {}
+        for k, v in forecasted.items():
+            try:
+                clean_forecasted[str(k)] = float(v) if isinstance(v, (int, float, np.number)) and np.isfinite(v) else 0.0
+            except:
+                clean_forecasted[str(k)] = 0.0
         
         return {
             "fold": int(args.fold),
@@ -228,7 +252,6 @@ def main():
             "model_type": str(args.model),
             "timestamp": timestamp,
             "date": final['date'].strftime('%Y-%m-%d') if final is not None else None,
-            "universe": str(universe),
             "benchmark": str(benchmark),
             "sharpe_ratio": float(metrics['sharpe_ratio']),
             "annual_return": float(metrics['annual_return']),
@@ -252,11 +275,18 @@ def main():
     
     repo_id = "P2SAMAPA/p2-etf-sdf-engine-results"
     
+    # Create repo if needed
+    api = HfApi()
+    try:
+        api.create_repo(repo_id, repo_type="dataset", exist_ok=True, token=token)
+    except:
+        pass
+    
     print("\n--- Saving Equity Results ---")
-    save_to_hf_parquet(repo_id, equity_record, token)
+    save_universe_to_parquet(repo_id, "equity_results.parquet", equity_record, token)
     
     print("\n--- Saving FI Results ---")
-    save_to_hf_parquet(repo_id, fi_record, token)
+    save_universe_to_parquet(repo_id, "fi_results.parquet", fi_record, token)
     
     print("\n=== Training complete ===")
 
