@@ -5,200 +5,120 @@ import os
 import json
 import shutil
 from datetime import datetime
-from pandas.tseries.offsets import CustomBusinessDay
-from pandas.tseries.holiday import USFederalHolidayCalendar
 from huggingface_hub import hf_hub_download
 
-st.set_page_config(page_title="SDF Engine", layout="wide")
+st.set_page_config(page_title="SDF Engine Debug", layout="wide")
 
-# Clear HF cache to avoid schema conflicts
-cache_dir = os.path.expanduser("~/.cache/huggingface")
-if os.path.exists(cache_dir):
-    shutil.rmtree(cache_dir, ignore_errors=True)
-
-st.markdown("""
-<style>
-    [data-testid="stSidebar"] {display: none;}
-    .hero-card {
-        background: linear-gradient(135deg, #1E3A5F 0%, #2C5282 100%);
-        border-radius: 20px;
-        padding: 2rem;
-        color: white;
-        margin-bottom: 1rem;
-    }
-    .hero-ticker {font-size: 3rem; font-weight: 800;}
-    .hero-return {font-size: 2rem; font-weight: 600; margin: 0.5rem 0;}
-    .metric-card {
-        background: white;
-        border-radius: 12px;
-        padding: 1rem;
-        text-align: center;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.05);
-    }
-    .metric-value {font-size: 1.8rem; font-weight: 700; color: #1E3A5F;}
-</style>
-""", unsafe_allow_html=True)
-
+st.title("🔍 DEBUG: Check Parquet File Contents")
 
 def get_hf_token():
     return st.secrets.get("HF_TOKEN") or os.getenv("HF_TOKEN")
 
-
-@st.cache_data(ttl=60)
-def load_best_result(parquet_filename):
-    """Load best result from Parquet with fresh download."""
+def load_raw_parquet(filename):
     token = get_hf_token()
-    if not token:
-        st.error("HF_TOKEN not found")
-        return None
-    
     try:
         file_path = hf_hub_download(
             repo_id="P2SAMAPA/p2-etf-sdf-engine-results",
-            filename=parquet_filename,
+            filename=filename,
             repo_type="dataset",
             token=token,
             force_download=True
         )
-        
-        df = pd.read_parquet(file_path)
-        
-        if len(df) == 0:
-            return None
-        
-        # Get best Sharpe
-        best_idx = df['sharpe_ratio'].idxmax()
-        best = df.loc[best_idx].to_dict()
-        
-        # Parse JSON strings
-        best['top_etfs'] = json.loads(best.get('top_etfs', '[]'))
-        best['forecasted_returns'] = json.loads(best.get('forecasted_returns', '{}'))
-        best['scores'] = json.loads(best.get('scores', '{}'))
-        
-        return best
-        
+        return pd.read_parquet(file_path)
     except Exception as e:
-        st.error(f"Error loading {parquet_filename}: {str(e)}")
+        st.error(f"Error loading {filename}: {e}")
         return None
 
+col1, col2 = st.columns(2)
 
-def get_next_trading_date():
-    us_cal = USFederalHolidayCalendar()
-    nyse = CustomBusinessDay(calendar=us_cal)
-    return (datetime.now().date() + nyse).strftime('%Y-%m-%d')
-
-
-def render_universe(title, parquet_file, benchmark):
-    st.header(title)
-    st.markdown(f"**Benchmark:** {benchmark}")
-    
-    data = load_best_result(parquet_file)
-    
-    if not data:
-        st.warning("No results found.")
-        return
-    
-    # Extract data
-    top_etfs = data.get('top_etfs', [])
-    forecasted = data.get('forecasted_returns', {})
-    scores = data.get('scores', {})
-    
-    # Get metrics with validation
-    sharpe = float(data.get('sharpe_ratio', 0))
-    ann_ret = float(data.get('annual_return', 0))
-    max_dd = float(data.get('max_drawdown', 0))
-    
-    # Ensure finite values
-    if not np.isfinite(sharpe):
-        sharpe = 0.0
-    if not np.isfinite(ann_ret):
-        ann_ret = 0.0
-    if not np.isfinite(max_dd):
-        max_dd = 0.0
-    
-    # Hero card - sort by forecasted return to get true top ETF
-    if forecasted:
-        sorted_etfs = sorted(forecasted.items(), key=lambda x: x[1], reverse=True)
-        top_etf, top_ret = sorted_etfs[0]
-        top_pct = float(top_ret) * 100 if np.isfinite(float(top_ret)) else 0
+with col1:
+    st.header("Equity File")
+    eq_df = load_raw_parquet("equity_results.parquet")
+    if eq_df is not None:
+        st.write(f"Shape: {eq_df.shape}")
+        st.write("All columns:", list(eq_df.columns))
         
-        sec_etf = sorted_etfs[1][0] if len(sorted_etfs) > 1 else None
-        sec_pct = float(forecasted.get(sec_etf, 0)) * 100 if sec_etf else 0
+        if len(eq_df) > 0:
+            st.subheader("Last row (most recent):")
+            last_row = eq_df.iloc[-1]
+            
+            st.write("Raw metric values:")
+            for col in ['sharpe_ratio', 'annual_return', 'max_drawdown', 'volatility', 'win_rate', 'total_return']:
+                val = last_row[col]
+                st.write(f"  {col}: {val} (type: {type(val)})")
+            
+            st.subheader("JSON fields:")
+            st.write("top_etfs:", json.loads(last_row['top_etfs']))
+            st.write("forecasted_returns:", json.loads(last_row['forecasted_returns']))
+            
+            # Check if all metrics are zero
+            metrics = [last_row['sharpe_ratio'], last_row['annual_return'], last_row['max_drawdown']]
+            if all(abs(m) < 0.0001 for m in metrics):
+                st.error("🚨 ALL METRICS ARE ZERO!")
+                st.info("This means the training calculated zeros or failed to calculate properly.")
+        else:
+            st.error("File is empty!")
+
+with col2:
+    st.header("FI File")
+    fi_df = load_raw_parquet("fi_results.parquet")
+    if fi_df is not None:
+        st.write(f"Shape: {fi_df.shape}")
+        st.write("All columns:", list(fi_df.columns))
+        
+        if len(fi_df) > 0:
+            st.subheader("Last row (most recent):")
+            last_row = fi_df.iloc[-1]
+            
+            st.write("Raw metric values:")
+            for col in ['sharpe_ratio', 'annual_return', 'max_drawdown', 'volatility', 'win_rate', 'total_return']:
+                val = last_row[col]
+                st.write(f"  {col}: {val} (type: {type(val)})")
+            
+            st.subheader("JSON fields:")
+            st.write("top_etfs:", json.loads(last_row['top_etfs']))
+            st.write("forecasted_returns:", json.loads(last_row['forecasted_returns']))
+            
+            # Check if all metrics are zero
+            metrics = [last_row['sharpe_ratio'], last_row['annual_return'], last_row['max_drawdown']]
+            if all(abs(m) < 0.0001 for m in metrics):
+                st.error("🚨 ALL METRICS ARE ZERO!")
+        else:
+            st.error("File is empty!")
+
+# Comparison
+if eq_df is not None and fi_df is not None and len(eq_df) > 0 and len(fi_df) > 0:
+    st.header("Comparison")
+    
+    eq_last = eq_df.iloc[-1]
+    fi_last = fi_df.iloc[-1]
+    
+    st.write("Equity vs FI (last row):")
+    comparison_data = {
+        'Metric': ['sharpe_ratio', 'annual_return', 'max_drawdown', 'volatility', 'win_rate', 'total_return'],
+        'Equity': [eq_last[col] for col in ['sharpe_ratio', 'annual_return', 'max_drawdown', 'volatility', 'win_rate', 'total_return']],
+        'FI': [fi_last[col] for col in ['sharpe_ratio', 'annual_return', 'max_drawdown', 'volatility', 'win_rate', 'total_return']]
+    }
+    st.table(pd.DataFrame(comparison_data))
+
+st.markdown("---")
+st.header("🔧 Next Steps")
+
+if eq_df is not None and len(eq_df) > 0:
+    eq_metrics = [eq_df.iloc[-1]['sharpe_ratio'], eq_df.iloc[-1]['annual_return'], eq_df.iloc[-1]['max_drawdown']]
+    if all(abs(m) < 0.0001 for m in eq_metrics):
+        st.error("""
+        **All metrics are zero!** This means:
+        
+        1. Check GitHub Actions training logs - did it complete successfully?
+        2. Look for lines starting with `[EQUITY] RESULTS:` and `[FI] RESULTS:`
+        3. If those show non-zero values, the save failed
+        4. If those show zeros too, the calculation failed
+        
+        Common causes:
+        - `safe_metrics()` received empty returns
+        - Division by zero in calculation
+        - All strategy returns were NaN
+        """)
     else:
-        top_etf, top_pct = "N/A", 0
-        sec_etf, sec_pct = None, 0
-    
-    if top_etf != "N/A":
-        col1, col2 = st.columns([2, 1])
-        
-        with col1:
-            st.markdown(f"""
-            <div class="hero-card">
-                <div class="hero-ticker">{top_etf}</div>
-                <div class="hero-return">+{top_pct:.3f}%</div>
-                <div>Expected Return – {get_next_trading_date()}</div>
-            </div>
-            """, unsafe_allow_html=True)
-            if sec_etf:
-                st.markdown(f"📈 **{sec_etf}** +{sec_pct:.3f}%")
-        
-        with col2:
-            st.markdown(f"""
-            <div class="metric-card">
-                <div class="metric-value">{ann_ret*100:.1f}%</div>
-                <div>Annual Return</div>
-            </div>
-            <div class="metric-card" style="margin-top:12px">
-                <div class="metric-value">{sharpe:.2f}</div>
-                <div>Sharpe Ratio</div>
-            </div>
-            <div class="metric-card" style="margin-top:12px">
-                <div class="metric-value">{-max_dd*100:.1f}%</div>
-                <div>Max Drawdown</div>
-            </div>
-            """, unsafe_allow_html=True)
-    else:
-        st.info("No ETF predictions available.")
-        return
-    
-    # Rankings table
-    st.markdown("---")
-    st.subheader("All ETF Rankings")
-    
-    if forecasted:
-        rows = []
-        for etf, ret in forecasted.items():
-            ret_val = float(ret) * 100 if np.isfinite(float(ret)) else 0
-            score_val = float(scores.get(etf, 0))
-            rows.append({
-                "ETF": etf,
-                "Expected Return (%)": ret_val,
-                "Score": score_val
-            })
-        
-        if rows:
-            df = pd.DataFrame(rows)
-            df = df.sort_values("Expected Return (%)", ascending=False)
-            st.dataframe(df, use_container_width=True, hide_index=True)
-
-
-def main():
-    st.title("SDF Engine – ETF Signal Generator")
-    
-    tab1, tab2 = st.tabs(["📈 Equity ETFs", "🏦 FI & Commodities"])
-    
-    with tab1:
-        render_universe("US Equity ETFs", "equity_results.parquet", "SPY")
-    
-    with tab2:
-        render_universe("Fixed Income & Commodities", "fi_results.parquet", "AGG")
-    
-    st.markdown(
-        f'<div style="text-align:center; margin-top:2rem; color:#718096;">'
-        f'Last updated: {datetime.now().strftime("%d %b %Y %H:%M")}</div>',
-        unsafe_allow_html=True
-    )
-
-
-if __name__ == "__main__":
-    main()
+        st.success("Metrics look good! The issue is in the display app.")
