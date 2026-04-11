@@ -112,4 +112,41 @@ try:
         "total_return": metrics['total_return'],
         "top_etfs": json.dumps([str(x) for x in final['selected_assets']]),
         "forecasted_returns": json.dumps({str(k): float(v) for k, v in final['forecasted_returns'].items()}),
-        "scores
+        "scores": json.dumps({str(k): float(v) for k, v in final['scores'].items()}),
+    }
+    
+    print(f"\nRECORD: {record}")
+    
+    # Save
+    token = os.getenv("HF_TOKEN")
+    api = HfApi()
+    repo_id = "P2SAMAPA/p2-etf-sdf-engine-results"
+    
+    try:
+        api.create_repo(repo_id, repo_type="dataset", exist_ok=True, token=token)
+    except:
+        pass
+    
+    # Simple save
+    df = pd.DataFrame([record])
+    ds = Dataset.from_pandas(df)
+    buffer = BytesIO()
+    ds.to_parquet(buffer)
+    buffer.seek(0)
+    
+    api.upload_file(
+        path_or_fileobj=buffer,
+        path_in_repo="test_equity.parquet",
+        repo_id=repo_id,
+        repo_type="dataset",
+        token=token
+    )
+    
+    print("\nSAVED to test_equity.parquet")
+    print("SUCCESS")
+    
+except Exception as e:
+    print(f"\nERROR: {e}")
+    import traceback
+    traceback.print_exc()
+    sys.exit(1)
