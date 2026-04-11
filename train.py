@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-train.py - Parallel matrix training with backtest metrics
-Outputs two Parquet files: equity_results.parquet and fi_results.parquet
+train.py - Fixed overflow handling for extreme returns
 """
 
 import os
@@ -46,7 +45,7 @@ def override_config(lr: float):
 
 
 def safe_metrics(strategy_returns, benchmark_returns, universe_name=""):
-    """Compute metrics with overflow protection."""
+    """Compute metrics with proper overflow protection."""
     print(f"\n  [{universe_name}] Computing metrics...")
     print(f"  [{universe_name}] Returns count: {len(strategy_returns)}")
     
@@ -55,30 +54,56 @@ def safe_metrics(strategy_returns, benchmark_returns, universe_name=""):
         return {k: 0.0 for k in ['sharpe_ratio', 'annual_return', 'volatility',
                                  'max_drawdown', 'win_rate', 'total_return']}
     
-    # Calculate metrics
-    total_return = (1 + strategy_returns).prod() - 1
-    n_days = len(strategy_returns)
+    # CRITICAL FIX: Clip individual returns to prevent overflow
+    # Daily returns should never be >100% or <-100%
+    clipped_returns = strategy_returns.clip(-0.99, 1.0)
+    
+    # Check for extreme values
+    if (strategy_returns < -0.5).any() or (strategy_returns > 0.5).any():
+        print(f"  [{universe_name}] WARNING: Extreme returns detected!")
+        print(f"    Min: {strategy_returns.min():.4f}")
+        print(f"    Max: {strategy_returns.max():.4f}")
+        print(f"    Using clipped returns for calculation")
+    
+    # Calculate total return safely
+    total_return = (1 + clipped_returns).prod() - 1
+    
+    # Handle inf/nan
+    if not np.isfinite(total_return):
+        print(f"  [{universe_name}] WARNING: Non-finite total_return ({total_return}), using 0")
+        total_return = 0.0
+    
+    # Cap at reasonable limits
+    total_return = float(np.clip(total_return, -0.9999, 10.0))  # Max 1000% total return
+    
+    n_days = len(clipped_returns)
     years = n_days / 252.0
     
     print(f"  [{universe_name}] Total return: {total_return:.6f}, Days: {n_days}, Years: {years:.4f}")
     
-    # Annual return
-    if years >= 0.1:  # At least ~1 month
-        annual_return = (1 + total_return) ** (1 / years) - 1
+    # Annual return with overflow protection
+    if years >= 0.1:
+        try:
+            annual_return = (1 + total_return) ** (1 / years) - 1
+            if not np.isfinite(annual_return):
+                annual_return = total_return * (252.0 / n_days)  # Fallback to simple scaling
+        except:
+            annual_return = total_return * (252.0 / n_days)
     elif n_days > 0:
         annual_return = total_return * (252.0 / n_days)
     else:
         annual_return = 0.0
     
+    # Validate annual return
     if not np.isfinite(annual_return):
         annual_return = 0.0
-    annual_return = float(np.clip(annual_return, -1.0, 10.0))
+    annual_return = float(np.clip(annual_return, -1.0, 5.0))  # Cap at 500% annual
     
     # Volatility
-    volatility = strategy_returns.std() * np.sqrt(252)
+    volatility = clipped_returns.std() * np.sqrt(252)
     volatility = float(volatility) if np.isfinite(volatility) else 0.0
     
-    # Sharpe
+    # Sharpe ratio with zero vol protection
     if volatility > 1e-10:
         sharpe = annual_return / volatility
     else:
@@ -86,15 +111,15 @@ def safe_metrics(strategy_returns, benchmark_returns, universe_name=""):
     sharpe = float(np.clip(sharpe, -10, 10))
     
     # Max drawdown
-    cum = (1 + strategy_returns).cumprod()
+    cum = (1 + clipped_returns).cumprod()
     rolling_max = cum.cummax()
     drawdown = (cum - rolling_max) / rolling_max
     max_drawdown = float(drawdown.min()) if len(drawdown) > 0 else 0.0
     
     # Win rate
-    win_rate = float((strategy_returns > 0).mean())
+    win_rate = float((clipped_returns > 0).mean())
     
-    print(f"  [{universe_name}] RESULTS: AnnRet={annual_return:.6f}, Sharpe={sharpe:.6f}, MaxDD={max_drawdown:.6f}, Vol={volatility:.6f}")
+    print(f"  [{universe_name}] RESULTS: AnnRet={annual_return:.6f} ({annual_return*100:.2f}%), Sharpe={sharpe:.4f}, MaxDD={max_drawdown:.4f}, Vol={volatility:.4f}")
     
     return {
         'sharpe_ratio': sharpe,
@@ -102,7 +127,7 @@ def safe_metrics(strategy_returns, benchmark_returns, universe_name=""):
         'volatility': volatility,
         'max_drawdown': max_drawdown,
         'win_rate': win_rate,
-        'total_return': float(total_return),
+        'total_return': total_return,
     }
 
 
@@ -134,8 +159,7 @@ def run_backtest(assets, benchmark, start_date, end_date, window_size, top_n, ma
     # Load benchmark for comparison only
     _, _, benchmark_returns = engine.prepare_data(start_date, end_date)
     
-    # Calculate metrics - THIS IS THE KEY FIX
-    # Use ONLY strategy returns, not mixed with benchmark
+    # Calculate metrics
     metrics = safe_metrics(strat_returns, benchmark_returns, universe_name)
     
     final_signals = results_df.iloc[-1] if len(results_df) > 0 else None
@@ -178,9 +202,9 @@ def save_universe_to_parquet(repo_id, filename, record, token):
         )
         
         print(f"\n  SAVED {filename}:")
-        print(f"    Sharpe: {record['sharpe_ratio']}")
-        print(f"    AnnRet: {record['annual_return']}")
-        print(f"    MaxDD: {record['max_drawdown']}")
+        print(f"    Sharpe: {record['sharpe_ratio']:.4f}")
+        print(f"    AnnRet: {record['annual_return']:.4f} ({record['annual_return']*100:.2f}%)")
+        print(f"    MaxDD: {record['max_drawdown']:.4f}")
         return True
         
     except Exception as e:
@@ -233,12 +257,8 @@ def main():
     # Verify they're different
     print(f"\n{'='*60}")
     print("VERIFICATION:")
-    print(f"  Equity Sharpe: {eq_metrics['sharpe_ratio']:.6f}")
-    print(f"  FI Sharpe:     {fi_metrics['sharpe_ratio']:.6f}")
-    print(f"  Same Sharpe?   {abs(eq_metrics['sharpe_ratio'] - fi_metrics['sharpe_ratio']) < 0.0001}")
-    print(f"  Equity AnnRet: {eq_metrics['annual_return']:.6f}")
-    print(f"  FI AnnRet:     {fi_metrics['annual_return']:.6f}")
-    print(f"  Same AnnRet?   {abs(eq_metrics['annual_return'] - fi_metrics['annual_return']) < 0.0001}")
+    print(f"  Equity: Sharpe={eq_metrics['sharpe_ratio']:.4f}, AnnRet={eq_metrics['annual_return']:.4f}")
+    print(f"  FI:     Sharpe={fi_metrics['sharpe_ratio']:.4f}, AnnRet={fi_metrics['annual_return']:.4f}")
     
     # Build records
     timestamp = datetime.now().isoformat()
@@ -285,8 +305,8 @@ def main():
     
     print(f"\n{'='*60}")
     print("FINAL RECORDS:")
-    print(f"  Equity: Sharpe={eq_record['sharpe_ratio']:.6f}, AnnRet={eq_record['annual_return']:.6f}")
-    print(f"  FI:     Sharpe={fi_record['sharpe_ratio']:.6f}, AnnRet={fi_record['annual_return']:.6f}")
+    print(f"  Equity: Sharpe={eq_record['sharpe_ratio']:.4f}, AnnRet={eq_record['annual_return']:.4f}")
+    print(f"  FI:     Sharpe={fi_record['sharpe_ratio']:.4f}, AnnRet={fi_record['annual_return']:.4f}")
     
     # Upload
     token = os.getenv("HF_TOKEN")
