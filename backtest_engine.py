@@ -144,18 +144,12 @@ class BacktestEngine:
                 asset_name = row['asset']
                 scores_dict[asset_name] = float(row['composite_score'])
             
-            print(f"  Computed {len(scores_dict)} scores")
-            if scores_dict:
-                sample = list(scores_dict.items())[:3]
-                print(f"  Sample: {sample}")
-
             # FIX: Scale strategy return from test period
             selected_assets = selected['asset'].tolist()
             if len(selected_assets) > 0:
                 raw_strategy_return = test_returns[selected_assets].mean()
                 strategy_return = self._scale_returns(raw_strategy_return)
                 strategy_return = float(np.clip(strategy_return, -0.5, 0.5))
-                print(f"  Strategy return: raw={raw_strategy_return:.6f}, scaled={strategy_return:.6f}")
             else:
                 strategy_return = 0
 
