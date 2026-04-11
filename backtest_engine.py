@@ -65,6 +65,21 @@ class BacktestEngine:
         self.benchmark_returns_ = self.loader.get_benchmark_data(self.benchmark, start_date, end_date)
         return self.returns_, self.macro_, self.benchmark_returns_
 
+    def _scale_returns(self, returns_value):
+        """
+        Scale returns to decimal form.
+        Detects if returns are in percentage (>10) and converts to decimal.
+        """
+        if abs(returns_value) > 10:
+            # Returns are in percentage points (e.g., 85.86 = 85.86%)
+            return returns_value / 100.0
+        elif abs(returns_value) > 1:
+            # Returns might be in decimal * 100 (e.g., 1.47 = 1.47%)
+            return returns_value / 100.0
+        else:
+            # Returns are already in decimal form (e.g., 0.0147 = 1.47%)
+            return returns_value
+
     def _run_single_period(
         self,
         train_returns: pd.DataFrame,
@@ -105,6 +120,13 @@ class BacktestEngine:
             reconstructor.fit(train_returns_filled, factors, sparse_loadings)
             forecasted_returns, _ = reconstructor.reconstruct(forecasted_factors)
 
+            # FIX: Scale forecasted returns to decimal form
+            scaled_forecasted = {}
+            for asset, ret in zip(self.assets, forecasted_returns):
+                scaled_ret = self._scale_returns(ret)
+                # Safety clip: daily returns should never exceed ±50%
+                scaled_forecasted[asset] = float(np.clip(scaled_ret, -0.5, 0.5))
+
             # Step 5: Score and rank
             scorer = CrossSectionalScorer(
                 factor_exposure_weight=config.factor_exposure_weight,
@@ -116,23 +138,24 @@ class BacktestEngine:
             scores_df = scorer.compute_scores(forecasted_returns, forecasted_factors)
             selected = scorer.select_top_n(scores_df, config.top_n)
 
-            # FIX: Convert scores to simple {asset: score} dict
-            # scores_df has columns: ['asset', 'expected_return', 'norm_return', 'factor_exposure_score', 'residual_vol_penalty', 'composite_score']
+            # Convert scores to simple {asset: score} dict
             scores_dict = {}
             for _, row in scores_df.iterrows():
                 asset_name = row['asset']
-                # Use composite_score as the main score
                 scores_dict[asset_name] = float(row['composite_score'])
             
-            # Debug
             print(f"  Computed {len(scores_dict)} scores")
             if scores_dict:
                 sample = list(scores_dict.items())[:3]
                 print(f"  Sample: {sample}")
 
+            # FIX: Scale strategy return from test period
             selected_assets = selected['asset'].tolist()
             if len(selected_assets) > 0:
-                strategy_return = test_returns[selected_assets].mean()
+                raw_strategy_return = test_returns[selected_assets].mean()
+                strategy_return = self._scale_returns(raw_strategy_return)
+                strategy_return = float(np.clip(strategy_return, -0.5, 0.5))
+                print(f"  Strategy return: raw={raw_strategy_return:.6f}, scaled={strategy_return:.6f}")
             else:
                 strategy_return = 0
 
@@ -140,8 +163,8 @@ class BacktestEngine:
                 'date': test_returns.name,
                 'selected_assets': selected_assets,
                 'strategy_return': strategy_return,
-                'forecasted_returns': dict(zip(self.assets, forecasted_returns)),
-                'scores': scores_dict  # Now a simple {asset: score} dict
+                'forecasted_returns': scaled_forecasted,
+                'scores': scores_dict
             }
 
         except Exception as e:
@@ -226,11 +249,10 @@ class BacktestEngine:
         total_return = cum_returns.iloc[-1] - 1
         years = len(returns) / 252
         
-        # FIX: Better annualization for short periods
-        if years > 0.1:  # At least ~1 month
+        # Better annualization for short periods
+        if years > 0.1:
             annual_return = (1 + total_return) ** (1 / years) - 1
         else:
-            # For very short periods, use simple scaling
             annual_return = total_return * (252 / len(returns))
         
         annual_return = 0.0 if not np.isfinite(annual_return) else float(annual_return)
