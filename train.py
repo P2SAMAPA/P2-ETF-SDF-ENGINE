@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-train.py - Fixed overflow handling for extreme returns
+train.py - EMERGENCY DEBUG VERSION
 """
 
 import os
@@ -23,7 +23,7 @@ from backtest_engine import BacktestEngine
 warnings.filterwarnings("ignore", category=UserWarning, module="statsmodels.tsa.base.tsa_model")
 
 print("=" * 60)
-print("train.py started")
+print("train.py EMERGENCY DEBUG VERSION")
 print("=" * 60)
 sys.stdout.flush()
 
@@ -45,83 +45,107 @@ def override_config(lr: float):
 
 
 def safe_metrics(strategy_returns, benchmark_returns, universe_name=""):
-    """Compute metrics with proper overflow protection."""
-    print(f"\n  [{universe_name}] Computing metrics...")
-    print(f"  [{universe_name}] Returns count: {len(strategy_returns)}")
+    """Compute metrics with EMERGENCY logging."""
+    print(f"\n{'='*40}")
+    print(f"[{universe_name}] METRICS CALCULATION START")
+    print(f"[{universe_name}] Input returns count: {len(strategy_returns)}")
     
     if len(strategy_returns) == 0:
-        print(f"  [{universe_name}] WARNING: Empty returns")
+        print(f"[{universe_name}] ERROR: Empty returns!")
         return {k: 0.0 for k in ['sharpe_ratio', 'annual_return', 'volatility',
                                  'max_drawdown', 'win_rate', 'total_return']}
     
-    # CRITICAL FIX: Clip individual returns to prevent overflow
-    # Daily returns should never be >100% or <-100%
-    clipped_returns = strategy_returns.clip(-0.99, 1.0)
+    # Log raw returns stats
+    print(f"[{universe_name}] Raw returns stats:")
+    print(f"  Min: {strategy_returns.min()}")
+    print(f"  Max: {strategy_returns.max()}")
+    print(f"  Mean: {strategy_returns.mean()}")
+    print(f"  Std: {strategy_returns.std()}")
+    print(f"  Any NaN: {strategy_returns.isna().any()}")
+    print(f"  Any Inf: {np.isinf(strategy_returns).any()}")
     
-    # Check for extreme values
-    if (strategy_returns < -0.5).any() or (strategy_returns > 0.5).any():
-        print(f"  [{universe_name}] WARNING: Extreme returns detected!")
-        print(f"    Min: {strategy_returns.min():.4f}")
-        print(f"    Max: {strategy_returns.max():.4f}")
-        print(f"    Using clipped returns for calculation")
+    # STEP 1: Clean returns
+    clean_returns = strategy_returns.replace([np.inf, -np.inf], np.nan).fillna(0)
+    clean_returns = clean_returns.clip(-0.99, 1.0)
     
-    # Calculate total return safely
-    total_return = (1 + clipped_returns).prod() - 1
+    print(f"[{universe_name}] After cleaning:")
+    print(f"  Min: {clean_returns.min()}")
+    print(f"  Max: {clean_returns.max()}")
     
-    # Handle inf/nan
+    # STEP 2: Calculate total return
+    gross_returns = 1 + clean_returns
+    print(f"[{universe_name}] Gross returns (1+r):")
+    print(f"  Min: {gross_returns.min()}")
+    print(f"  Max: {gross_returns.max()}")
+    
+    total_gross = gross_returns.prod()
+    print(f"[{universe_name}] Total gross return: {total_gross}")
+    
+    total_return = total_gross - 1
+    print(f"[{universe_name}] Total return (before clip): {total_return}")
+    
+    # Handle non-finite
     if not np.isfinite(total_return):
-        print(f"  [{universe_name}] WARNING: Non-finite total_return ({total_return}), using 0")
+        print(f"[{universe_name}] WARNING: Non-finite total_return!")
         total_return = 0.0
     
-    # Cap at reasonable limits
-    total_return = float(np.clip(total_return, -0.9999, 10.0))  # Max 1000% total return
+    total_return = float(np.clip(total_return, -0.9999, 10.0))
+    print(f"[{universe_name}] Total return (after clip): {total_return}")
     
-    n_days = len(clipped_returns)
+    # STEP 3: Annualize
+    n_days = len(clean_returns)
     years = n_days / 252.0
+    print(f"[{universe_name}] Days: {n_days}, Years: {years}")
     
-    print(f"  [{universe_name}] Total return: {total_return:.6f}, Days: {n_days}, Years: {years:.4f}")
-    
-    # Annual return with overflow protection
-    if years >= 0.1:
-        try:
-            annual_return = (1 + total_return) ** (1 / years) - 1
-            if not np.isfinite(annual_return):
-                annual_return = total_return * (252.0 / n_days)  # Fallback to simple scaling
-        except:
-            annual_return = total_return * (252.0 / n_days)
-    elif n_days > 0:
+    if years > 0 and n_days > 0:
+        # Simple annualization (safer)
         annual_return = total_return * (252.0 / n_days)
+        print(f"[{universe_name}] Annual return (simple scaling): {annual_return}")
     else:
         annual_return = 0.0
+        print(f"[{universe_name}] WARNING: No time period!")
     
-    # Validate annual return
+    # Validate
     if not np.isfinite(annual_return):
+        print(f"[{universe_name}] WARNING: Non-finite annual_return!")
         annual_return = 0.0
-    annual_return = float(np.clip(annual_return, -1.0, 5.0))  # Cap at 500% annual
     
-    # Volatility
-    volatility = clipped_returns.std() * np.sqrt(252)
+    annual_return = float(np.clip(annual_return, -2.0, 5.0))
+    print(f"[{universe_name}] Annual return (final): {annual_return}")
+    
+    # STEP 4: Volatility
+    volatility = clean_returns.std() * np.sqrt(252)
     volatility = float(volatility) if np.isfinite(volatility) else 0.0
+    print(f"[{universe_name}] Volatility: {volatility}")
     
-    # Sharpe ratio with zero vol protection
+    # STEP 5: Sharpe
     if volatility > 1e-10:
         sharpe = annual_return / volatility
+        print(f"[{universe_name}] Sharpe (raw): {sharpe}")
     else:
-        sharpe = 10.0 if annual_return > 0 else (-10.0 if annual_return < 0 else 0.0)
-    sharpe = float(np.clip(sharpe, -10, 10))
+        sharpe = 0.0
+        print(f"[{universe_name}] Sharpe: zero volatility, set to 0")
     
-    # Max drawdown
-    cum = (1 + clipped_returns).cumprod()
+    if not np.isfinite(sharpe):
+        print(f"[{universe_name}] WARNING: Non-finite sharpe!")
+        sharpe = 0.0
+    
+    sharpe = float(np.clip(sharpe, -10, 10))
+    print(f"[{universe_name}] Sharpe (final): {sharpe}")
+    
+    # STEP 6: Max drawdown
+    cum = (1 + clean_returns).cumprod()
     rolling_max = cum.cummax()
     drawdown = (cum - rolling_max) / rolling_max
     max_drawdown = float(drawdown.min()) if len(drawdown) > 0 else 0.0
+    print(f"[{universe_name}] Max drawdown: {max_drawdown}")
     
-    # Win rate
-    win_rate = float((clipped_returns > 0).mean())
+    # STEP 7: Win rate
+    win_rate = float((clean_returns > 0).mean())
+    print(f"[{universe_name}] Win rate: {win_rate}")
     
-    print(f"  [{universe_name}] RESULTS: AnnRet={annual_return:.6f} ({annual_return*100:.2f}%), Sharpe={sharpe:.4f}, MaxDD={max_drawdown:.4f}, Vol={volatility:.4f}")
-    
-    return {
+    # FINAL RESULTS
+    result = {
         'sharpe_ratio': sharpe,
         'annual_return': annual_return,
         'volatility': volatility,
@@ -129,34 +153,36 @@ def safe_metrics(strategy_returns, benchmark_returns, universe_name=""):
         'win_rate': win_rate,
         'total_return': total_return,
     }
+    
+    print(f"[{universe_name}] FINAL METRICS:")
+    for k, v in result.items():
+        print(f"  {k}: {v}")
+    print(f"{'='*40}")
+    
+    return result
 
 
 def run_backtest(assets, benchmark, start_date, end_date, window_size, top_n, max_windows=None, universe_name=""):
-    """Run rolling window backtest."""
+    """Run rolling window backtest with debug."""
     print(f"\n{'='*60}")
-    print(f"[{universe_name}] Backtest: {len(assets)} assets, benchmark={benchmark}")
-    print(f"[{universe_name}] Range: {start_date} to {end_date}")
+    print(f"[{universe_name}] BACKTEST START")
+    print(f"[{universe_name}] Assets: {len(assets)}, Benchmark: {benchmark}")
     sys.stdout.flush()
     
     engine = BacktestEngine(assets, benchmark, hf_token=os.getenv("HF_TOKEN"))
     results_df = engine.run_rolling_window(start_date, end_date, window_size, top_n, max_windows=max_windows)
     
+    print(f"[{universe_name}] Results shape: {results_df.shape}")
+    
     if len(results_df) == 0:
-        print(f"[{universe_name}] ERROR: No results")
+        print(f"[{universe_name}] ERROR: No results!")
         return None, None
     
-    print(f"[{universe_name}] Got {len(results_df)} results")
-    
-    # Calculate metrics from strategy returns
+    # Get strategy returns
     strat_returns = results_df.set_index('date')['strategy_return']
+    print(f"[{universe_name}] Strategy returns extracted: {len(strat_returns)}")
     
-    print(f"[{universe_name}] Strategy returns stats:")
-    print(f"  Min: {strat_returns.min():.6f}")
-    print(f"  Max: {strat_returns.max():.6f}")
-    print(f"  Mean: {strat_returns.mean():.6f}")
-    print(f"  Std: {strat_returns.std():.6f}")
-    
-    # Load benchmark for comparison only
+    # Get benchmark
     _, _, benchmark_returns = engine.prepare_data(start_date, end_date)
     
     # Calculate metrics
@@ -164,29 +190,42 @@ def run_backtest(assets, benchmark, start_date, end_date, window_size, top_n, ma
     
     final_signals = results_df.iloc[-1] if len(results_df) > 0 else None
     
+    print(f"[{universe_name}] BACKTEST COMPLETE")
     return metrics, final_signals
 
 
 def save_universe_to_parquet(repo_id, filename, record, token):
-    """Save universe record to HF as Parquet."""
+    """Save with verification."""
+    print(f"\n{'='*40}")
+    print(f"SAVING {filename}")
+    print(f"Record contents:")
+    for k, v in record.items():
+        if k not in ['forecasted_returns', 'scores', 'top_etfs']:
+            print(f"  {k}: {v} (type: {type(v)})")
+    
     try:
-        # Load existing or create new
+        # Try to load existing
         try:
             from datasets import load_dataset
             existing_ds = load_dataset(repo_id, data_files=filename, split="train", token=token)
             existing_df = existing_ds.to_pandas()
-            print(f"  Existing {filename}: {len(existing_df)} rows")
-        except:
+            print(f"  Existing rows: {len(existing_df)}")
+        except Exception as e:
+            print(f"  No existing file (or error): {e}")
             existing_df = pd.DataFrame()
-            print(f"  Creating new {filename}")
         
         # Create new row
         new_df = pd.DataFrame([record])
+        print(f"  New row metrics:")
+        print(f"    sharpe_ratio: {new_df['sharpe_ratio'].iloc[0]}")
+        print(f"    annual_return: {new_df['annual_return'].iloc[0]}")
+        print(f"    max_drawdown: {new_df['max_drawdown'].iloc[0]}")
         
         # Combine
         combined_df = pd.concat([existing_df, new_df], ignore_index=True)
+        print(f"  Combined rows: {len(combined_df)}")
         
-        # Convert and save
+        # Save
         ds = Dataset.from_pandas(combined_df)
         buffer = BytesIO()
         ds.to_parquet(buffer)
@@ -201,14 +240,27 @@ def save_universe_to_parquet(repo_id, filename, record, token):
             token=token
         )
         
-        print(f"\n  SAVED {filename}:")
-        print(f"    Sharpe: {record['sharpe_ratio']:.4f}")
-        print(f"    AnnRet: {record['annual_return']:.4f} ({record['annual_return']*100:.2f}%)")
-        print(f"    MaxDD: {record['max_drawdown']:.4f}")
+        print(f"  UPLOADED SUCCESSFULLY")
+        
+        # Verify by re-reading
+        print(f"  Verifying upload...")
+        verify_path = f"/tmp/verify_{filename}"
+        try:
+            from huggingface_hub import hf_hub_download
+            downloaded = hf_hub_download(repo_id, filename, repo_type="dataset", token=token, local_dir="/tmp", force_download=True)
+            verify_df = pd.read_parquet(downloaded)
+            last_row = verify_df.iloc[-1]
+            print(f"  Verification - Last row metrics:")
+            print(f"    sharpe_ratio: {last_row['sharpe_ratio']}")
+            print(f"    annual_return: {last_row['annual_return']}")
+            print(f"    max_drawdown: {last_row['max_drawdown']}")
+        except Exception as e:
+            print(f"  Verification failed: {e}")
+        
         return True
         
     except Exception as e:
-        print(f"  ERROR saving {filename}: {e}")
+        print(f"  ERROR: {e}")
         import traceback
         traceback.print_exc()
         return False
@@ -238,14 +290,14 @@ def main():
     
     # Process Equity
     print(f"\n{'='*60}")
-    print("PROCESSING EQUITY")
+    print("EQUITY PROCESSING")
     eq_assets = CONFIG['universes']['equity']['assets']
     eq_bench = CONFIG['universes']['equity']['benchmark']
     eq_metrics, eq_final = run_backtest(eq_assets, eq_bench, start_date, end_date, window_size, top_n, max_windows, "EQUITY")
     
     # Process FI
     print(f"\n{'='*60}")
-    print("PROCESSING FI/COMMODITY")
+    print("FI PROCESSING")
     fi_assets = CONFIG['universes']['fi_commodities']['assets']
     fi_bench = CONFIG['universes']['fi_commodities']['benchmark']
     fi_metrics, fi_final = run_backtest(fi_assets, fi_bench, start_date, end_date, window_size, top_n, max_windows, "FI")
@@ -254,35 +306,17 @@ def main():
         print("FATAL: One universe failed")
         sys.exit(1)
     
-    # Verify they're different
-    print(f"\n{'='*60}")
-    print("VERIFICATION:")
-    print(f"  Equity: Sharpe={eq_metrics['sharpe_ratio']:.4f}, AnnRet={eq_metrics['annual_return']:.4f}")
-    print(f"  FI:     Sharpe={fi_metrics['sharpe_ratio']:.4f}, AnnRet={fi_metrics['annual_return']:.4f}")
-    
     # Build records
     timestamp = datetime.now().isoformat()
     
     def build_record(metrics, final, universe, benchmark):
+        print(f"\nBuilding record for {universe}:")
+        print(f"  Input metrics: {metrics}")
+        
         forecasted = final.get('forecasted_returns', {}) if final is not None else {}
         scores = final.get('scores', {}) if final is not None else {}
         
-        # Clean values
-        clean_scores = {}
-        for k, v in scores.items():
-            try:
-                clean_scores[str(k)] = float(v) if np.isfinite(float(v)) else 0.0
-            except:
-                clean_scores[str(k)] = 0.0
-        
-        clean_forecasted = {}
-        for k, v in forecasted.items():
-            try:
-                clean_forecasted[str(k)] = float(v) if np.isfinite(float(v)) else 0.0
-            except:
-                clean_forecasted[str(k)] = 0.0
-        
-        return {
+        record = {
             "fold": int(args.fold),
             "learning_rate": float(args.lr),
             "model_type": str(args.model),
@@ -296,17 +330,19 @@ def main():
             "win_rate": float(metrics['win_rate']),
             "total_return": float(metrics['total_return']),
             "top_etfs": json.dumps([str(x) for x in final['selected_assets']]) if final is not None else "[]",
-            "forecasted_returns": json.dumps(clean_forecasted),
-            "scores": json.dumps(clean_scores),
+            "forecasted_returns": json.dumps({str(k): float(v) for k, v in forecasted.items()}),
+            "scores": json.dumps({str(k): float(v) for k, v in scores.items()}),
         }
+        
+        print(f"  Record metrics:")
+        print(f"    sharpe_ratio: {record['sharpe_ratio']}")
+        print(f"    annual_return: {record['annual_return']}")
+        print(f"    max_drawdown: {record['max_drawdown']}")
+        
+        return record
     
     eq_record = build_record(eq_metrics, eq_final, "equity", eq_bench)
     fi_record = build_record(fi_metrics, fi_final, "fi", fi_bench)
-    
-    print(f"\n{'='*60}")
-    print("FINAL RECORDS:")
-    print(f"  Equity: Sharpe={eq_record['sharpe_ratio']:.4f}, AnnRet={eq_record['annual_return']:.4f}")
-    print(f"  FI:     Sharpe={fi_record['sharpe_ratio']:.4f}, AnnRet={fi_record['annual_return']:.4f}")
     
     # Upload
     token = os.getenv("HF_TOKEN")
@@ -331,7 +367,7 @@ def main():
     save_universe_to_parquet(repo_id, "fi_results.parquet", fi_record, token)
     
     print(f"\n{'='*60}")
-    print("COMPLETE")
+    print("ALL DONE")
 
 if __name__ == "__main__":
     main()
