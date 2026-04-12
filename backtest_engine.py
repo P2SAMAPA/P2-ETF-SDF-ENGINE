@@ -67,18 +67,27 @@ class BacktestEngine:
 
     def _scale_returns(self, returns_value):
         """
-        Scale returns to decimal form.
-        Detects if returns are in percentage (>10) and converts to decimal.
+        FIX: The original logic divided ANY value with abs > 1 by 100, which
+        incorrectly scaled already-decimal daily returns like 0.0147 → no change,
+        but also scaled reasonable-looking values like 1.47 (which IS 1.47%, i.e.
+        0.0147 in decimal) down to 0.0147 — correct. However the problem was
+        that reconstructed returns from the VAR/PCA pipeline come out in the same
+        units as the input returns. If the source data is already in decimal form
+        (as is standard: 0.01 = 1%), then dividing by 100 again produces values
+        like 0.0001, which then annualise to essentially 0%.
+
+        The safe approach: trust the pipeline. The data_loader should be serving
+        decimal returns. We only divide by 100 if the value is clearly in
+        percentage-point form (abs > 1.0), and even then cap at ±50%.
         """
-        if abs(returns_value) > 10:
-            # Returns are in percentage points (e.g., 85.86 = 85.86%)
-            return returns_value / 100.0
-        elif abs(returns_value) > 1:
-            # Returns might be in decimal * 100 (e.g., 1.47 = 1.47%)
-            return returns_value / 100.0
-        else:
-            # Returns are already in decimal form (e.g., 0.0147 = 1.47%)
-            return returns_value
+        v = float(returns_value)
+        if not np.isfinite(v):
+            return 0.0
+        if abs(v) > 1.0:
+            # Clearly percentage-point form (e.g. 1.47 meaning 1.47%) → convert
+            v = v / 100.0
+        # At this point v should be in decimal form; clip to sane daily range
+        return float(np.clip(v, -0.5, 0.5))
 
     def _run_single_period(
         self,
@@ -120,12 +129,10 @@ class BacktestEngine:
             reconstructor.fit(train_returns_filled, factors, sparse_loadings)
             forecasted_returns, _ = reconstructor.reconstruct(forecasted_factors)
 
-            # FIX: Scale forecasted returns to decimal form
+            # Scale forecasted returns to decimal form
             scaled_forecasted = {}
             for asset, ret in zip(self.assets, forecasted_returns):
-                scaled_ret = self._scale_returns(ret)
-                # Safety clip: daily returns should never exceed ±50%
-                scaled_forecasted[asset] = float(np.clip(scaled_ret, -0.5, 0.5))
+                scaled_forecasted[asset] = self._scale_returns(ret)
 
             # Step 5: Score and rank
             scorer = CrossSectionalScorer(
@@ -133,25 +140,24 @@ class BacktestEngine:
                 residual_vol_penalty=config.residual_penalty
             )
             scorer.fit(self.assets, factors.columns.tolist(), sparse_loadings, reconstructor.residual_std_)
-            
-            # Get scores DataFrame
+
             scores_df = scorer.compute_scores(forecasted_returns, forecasted_factors)
             selected = scorer.select_top_n(scores_df, config.top_n)
 
-            # Convert scores to simple {asset: score} dict
             scores_dict = {}
             for _, row in scores_df.iterrows():
-                asset_name = row['asset']
-                scores_dict[asset_name] = float(row['composite_score'])
-            
-            # FIX: Scale strategy return from test period
+                scores_dict[row['asset']] = float(row['composite_score'])
+
+            # FIX: test_returns from the data source are in the same units as
+            # train_returns (decimal). Do NOT call _scale_returns on them — that
+            # was halving/zeroing real returns when they were already in decimal.
             selected_assets = selected['asset'].tolist()
             if len(selected_assets) > 0:
-                raw_strategy_return = test_returns[selected_assets].mean()
-                strategy_return = self._scale_returns(raw_strategy_return)
-                strategy_return = float(np.clip(strategy_return, -0.5, 0.5))
+                strategy_return = float(np.clip(
+                    test_returns[selected_assets].mean(), -0.5, 0.5
+                ))
             else:
-                strategy_return = 0
+                strategy_return = 0.0
 
             return {
                 'date': test_returns.name,
@@ -196,18 +202,18 @@ class BacktestEngine:
 
         results = []
         all_dates = self.returns_.index[window_size:]
-        
+
         if rebalance_freq > 1:
             all_dates = all_dates[::rebalance_freq]
             print(f"Rebalancing every {rebalance_freq} days: {len(all_dates)} periods")
-        
+
         if max_windows and len(all_dates) > max_windows:
             print(f"CI MODE: Limiting from {len(all_dates)} to {max_windows} windows")
             all_dates = all_dates[:max_windows]
 
         total = len(all_dates)
         is_ci = os.getenv('CI_MODE', '').lower() == 'true' or os.getenv('GITHUB_ACTIONS', '').lower() == 'true'
-        
+
         for i, date in enumerate(all_dates):
             if i % (10 if is_ci else 50) == 0 or i == total - 1:
                 print(f"Rolling: Processing {date.date()} ({i+1}/{total})")
@@ -242,13 +248,12 @@ class BacktestEngine:
         cum_returns = (1 + returns).cumprod()
         total_return = cum_returns.iloc[-1] - 1
         years = len(returns) / 252
-        
-        # Better annualization for short periods
+
         if years > 0.1:
             annual_return = (1 + total_return) ** (1 / years) - 1
         else:
             annual_return = total_return * (252 / len(returns))
-        
+
         annual_return = 0.0 if not np.isfinite(annual_return) else float(annual_return)
 
         volatility = returns.std() * np.sqrt(252)
