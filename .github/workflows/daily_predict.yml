@@ -2,14 +2,13 @@ name: Daily Signal Generation
 
 on:
   schedule:
-    # Every weekday at 23:00 UTC (after market close + data update)
     - cron: '0 23 * * 1-5'
   workflow_dispatch:
 
 jobs:
   predict:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
