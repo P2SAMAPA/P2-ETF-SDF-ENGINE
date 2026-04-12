@@ -67,26 +67,16 @@ class BacktestEngine:
 
     def _scale_returns(self, returns_value):
         """
-        FIX: The original logic divided ANY value with abs > 1 by 100, which
-        incorrectly scaled already-decimal daily returns like 0.0147 → no change,
-        but also scaled reasonable-looking values like 1.47 (which IS 1.47%, i.e.
-        0.0147 in decimal) down to 0.0147 — correct. However the problem was
-        that reconstructed returns from the VAR/PCA pipeline come out in the same
-        units as the input returns. If the source data is already in decimal form
-        (as is standard: 0.01 = 1%), then dividing by 100 again produces values
-        like 0.0001, which then annualise to essentially 0%.
-
-        The safe approach: trust the pipeline. The data_loader should be serving
-        decimal returns. We only divide by 100 if the value is clearly in
-        percentage-point form (abs > 1.0), and even then cap at ±50%.
+        Scale a single return value to decimal form.
+        Only divides by 100 if the value is clearly in percentage-point form
+        (abs > 1.0), e.g. 1.47 → 0.0147. Values already in decimal form
+        (e.g. 0.0147) pass through unchanged.
         """
         v = float(returns_value)
         if not np.isfinite(v):
             return 0.0
         if abs(v) > 1.0:
-            # Clearly percentage-point form (e.g. 1.47 meaning 1.47%) → convert
             v = v / 100.0
-        # At this point v should be in decimal form; clip to sane daily range
         return float(np.clip(v, -0.5, 0.5))
 
     def _run_single_period(
@@ -130,9 +120,10 @@ class BacktestEngine:
             forecasted_returns, _ = reconstructor.reconstruct(forecasted_factors)
 
             # Scale forecasted returns to decimal form
-            scaled_forecasted = {}
-            for asset, ret in zip(self.assets, forecasted_returns):
-                scaled_forecasted[asset] = self._scale_returns(ret)
+            scaled_forecasted = {
+                asset: self._scale_returns(ret)
+                for asset, ret in zip(self.assets, forecasted_returns)
+            }
 
             # Step 5: Score and rank
             scorer = CrossSectionalScorer(
@@ -140,17 +131,13 @@ class BacktestEngine:
                 residual_vol_penalty=config.residual_penalty
             )
             scorer.fit(self.assets, factors.columns.tolist(), sparse_loadings, reconstructor.residual_std_)
-
             scores_df = scorer.compute_scores(forecasted_returns, forecasted_factors)
             selected = scorer.select_top_n(scores_df, config.top_n)
 
-            scores_dict = {}
-            for _, row in scores_df.iterrows():
-                scores_dict[row['asset']] = float(row['composite_score'])
+            scores_dict = {row['asset']: float(row['composite_score']) for _, row in scores_df.iterrows()}
 
-            # FIX: test_returns from the data source are in the same units as
-            # train_returns (decimal). Do NOT call _scale_returns on them — that
-            # was halving/zeroing real returns when they were already in decimal.
+            # test_returns are already in decimal form (same units as train_returns)
+            # Do NOT call _scale_returns on them
             selected_assets = selected['asset'].tolist()
             if len(selected_assets) > 0:
                 strategy_return = float(np.clip(
@@ -212,7 +199,8 @@ class BacktestEngine:
             all_dates = all_dates[:max_windows]
 
         total = len(all_dates)
-        is_ci = os.getenv('CI_MODE', '').lower() == 'true' or os.getenv('GITHUB_ACTIONS', '').lower() == 'true'
+        is_ci = (os.getenv('CI_MODE', '').lower() == 'true'
+                 or os.getenv('GITHUB_ACTIONS', '').lower() == 'true')
 
         for i, date in enumerate(all_dates):
             if i % (10 if is_ci else 50) == 0 or i == total - 1:
@@ -236,12 +224,8 @@ class BacktestEngine:
 
         if len(returns) == 0:
             return {
-                'total_return': 0.0,
-                'annual_return': 0.0,
-                'volatility': 0.0,
-                'sharpe_ratio': 0.0,
-                'max_drawdown': 0.0,
-                'win_rate': 0.0,
+                'total_return': 0.0, 'annual_return': 0.0, 'volatility': 0.0,
+                'sharpe_ratio': 0.0, 'max_drawdown': 0.0, 'win_rate': 0.0,
                 'total_trades': 0
             }
 
@@ -255,7 +239,6 @@ class BacktestEngine:
             annual_return = total_return * (252 / len(returns))
 
         annual_return = 0.0 if not np.isfinite(annual_return) else float(annual_return)
-
         volatility = returns.std() * np.sqrt(252)
         sharpe = annual_return / (volatility + 1e-8) if volatility > 0 else 0.0
         sharpe = float(np.clip(sharpe, -10, 10))
