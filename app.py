@@ -5,13 +5,11 @@ import os
 import json
 import shutil
 from datetime import datetime
-from pandas.tseries.offsets import CustomBusinessDay
-from pandas.tseries.holiday import USFederalHolidayCalendar
 from huggingface_hub import hf_hub_download
 
 st.set_page_config(page_title="SDF Engine", layout="wide")
 
-# Clear cache
+# Clear HF cache so we always get the freshest signal file
 cache_dir = os.path.expanduser("~/.cache/huggingface")
 if os.path.exists(cache_dir):
     shutil.rmtree(cache_dir, ignore_errors=True)
@@ -32,93 +30,69 @@ def get_hf_token():
     return st.secrets.get("HF_TOKEN") or os.getenv("HF_TOKEN")
 
 
-@st.cache_data(ttl=60)
-def load_best_result(parquet_filename):
-    """Load latest result from Parquet."""
+@st.cache_data(ttl=300)
+def load_signals() -> dict:
+    """
+    Load latest_signals.json written by predict.py.
+    Returns the full payload dict, or empty dict on failure.
+    """
     token = get_hf_token()
     if not token:
-        return None
+        st.error("HF_TOKEN not configured in Streamlit secrets.")
+        return {}
     try:
-        file_path = hf_hub_download(
+        path = hf_hub_download(
             repo_id="P2SAMAPA/p2-etf-sdf-engine-results",
-            filename=parquet_filename,
+            filename="latest_signals.json",
             repo_type="dataset",
             token=token,
-            force_download=True
+            force_download=True,
         )
-        df = pd.read_parquet(file_path)
-        if len(df) == 0:
-            return None
-
-        # FIX 1: Use the LATEST row (most recent run) instead of best Sharpe.
-        # The parquet is an append-only log; the last row is today's signal.
-        # idxmax('sharpe_ratio') was selecting a historic lucky row whose
-        # backtest metrics happen to look good but whose forecasted_returns
-        # and scores reflect a past date, not today's prediction.
-        best = df.iloc[-1].to_dict()
-
-        # FIX 2: Parse JSON fields safely — handle both str and already-parsed types.
-        def safe_json(val, default):
-            if isinstance(val, (dict, list)):
-                return val
-            try:
-                return json.loads(val)
-            except Exception:
-                return default
-
-        best['top_etfs'] = safe_json(best.get('top_etfs', '[]'), [])
-        best['forecasted_returns'] = safe_json(best.get('forecasted_returns', '{}'), {})
-        best['scores'] = safe_json(best.get('scores', '{}'), {})
-
-        return best
-
+        with open(path) as f:
+            return json.load(f)
     except Exception as e:
-        st.error(f"Error: {e}")
-        return None
+        st.error(f"Could not load signals: {e}")
+        return {}
 
 
-def get_next_trading_date():
-    us_cal = USFederalHolidayCalendar()
-    nyse = CustomBusinessDay(calendar=us_cal)
-    return (datetime.now().date() + nyse).strftime('%Y-%m-%d')
-
-
-def render_universe(title, parquet_file, benchmark):
+def render_universe(signal: dict, title: str):
+    """Render one universe tab from its signal dict."""
     st.header(title)
+    benchmark = signal.get("benchmark", "")
     st.markdown(f"**Benchmark:** {benchmark}")
 
-    data = load_best_result(parquet_file)
-    if not data:
-        st.warning("No results found.")
+    if not signal or "top_etf" not in signal:
+        st.info("Signal not available yet — run the training + predict workflow first.")
         return
 
-    top_etfs = data.get('top_etfs', [])
-    forecasted = data.get('forecasted_returns', {})
-    scores = data.get('scores', {})
+    forecasted = signal.get("forecasted_returns", {})
+    scores = signal.get("scores", {})
 
-    # FIX 3: annual_return and max_drawdown come out of safe_metrics() in train.py
-    # already as decimals (e.g. 0.12 = 12%). The old code passed them straight
-    # into f"{ann_ret*100:.1f}%" which would have worked — but the idxmax() bug
-    # (Fix 1) meant we were reading a row where these values happened to be ~0.
-    # With Fix 1 in place the correct non-zero values now flow through here.
-    sharpe = float(data.get('sharpe_ratio', 0))
-    ann_ret = float(data.get('annual_return', 0))
-    max_dd = float(data.get('max_drawdown', 0))
+    sharpe   = float(signal.get("sharpe_ratio",   0))
+    ann_ret  = float(signal.get("annual_return",   0))
+    max_dd   = float(signal.get("max_drawdown",    0))
 
-    if not np.isfinite(sharpe):  sharpe = 0.0
+    if not np.isfinite(sharpe):  sharpe  = 0.0
     if not np.isfinite(ann_ret): ann_ret = 0.0
-    if not np.isfinite(max_dd):  max_dd = 0.0
+    if not np.isfinite(max_dd):  max_dd  = 0.0
 
-    # Hero card
+    # Hero — top ETF from forecasted_returns (already scaled to decimal)
     if forecasted:
         sorted_etfs = sorted(forecasted.items(), key=lambda x: x[1], reverse=True)
-        top, top_ret = sorted_etfs[0]
-        top_pct = float(top_ret) * 100 if np.isfinite(float(top_ret)) else 0
-        sec = sorted_etfs[1][0] if len(sorted_etfs) > 1 else None
-        sec_pct = float(forecasted.get(sec, 0)) * 100 if sec else 0
+        top, top_ret   = sorted_etfs[0]
+        top_pct        = float(top_ret) * 100
+        sec            = sorted_etfs[1][0] if len(sorted_etfs) > 1 else None
+        sec_pct        = float(forecasted.get(sec, 0)) * 100 if sec else 0
     else:
-        top, top_pct = "N/A", 0
-        sec, sec_pct = None, 0
+        top, top_pct   = "N/A", 0
+        sec, sec_pct   = None, 0
+
+    signal_date  = signal.get("signal_date", "—")
+    generated_at = signal.get("generated_at", "")
+    try:
+        generated_at = datetime.fromisoformat(generated_at).strftime("%Y-%m-%d %H:%M UTC")
+    except Exception:
+        pass
 
     if top != "N/A":
         col1, col2 = st.columns([2, 1])
@@ -127,49 +101,80 @@ def render_universe(title, parquet_file, benchmark):
             <div class="hero-card">
                 <div class="hero-ticker">{top}</div>
                 <div class="hero-return">+{top_pct:.3f}%</div>
-                <div>Expected Return – {get_next_trading_date()}</div>
+                <div>Expected Return – {signal_date}</div>
             </div>
             """, unsafe_allow_html=True)
 
             if sec:
                 st.markdown(f"📈 **{sec}** +{sec_pct:.3f}%")
 
+            st.caption(f"Generated {generated_at} · "
+                       f"Best config: fold={signal.get('best_fold')} "
+                       f"lr={signal.get('best_lr')} "
+                       f"model={signal.get('best_model')}")
+
         with col2:
             st.markdown(f"""
-            <div class="metric-card"><div class="metric-value">{ann_ret*100:.1f}%</div><div>Annual Return</div></div>
-            <div class="metric-card" style="margin-top:12px"><div class="metric-value">{sharpe:.2f}</div><div>Sharpe Ratio</div></div>
-            <div class="metric-card" style="margin-top:12px"><div class="metric-value">{-max_dd*100:.1f}%</div><div>Max Drawdown</div></div>
+            <div class="metric-card">
+                <div class="metric-value">{ann_ret*100:.1f}%</div>
+                <div>Annual Return</div>
+            </div>
+            <div class="metric-card" style="margin-top:12px">
+                <div class="metric-value">{sharpe:.2f}</div>
+                <div>Sharpe Ratio</div>
+            </div>
+            <div class="metric-card" style="margin-top:12px">
+                <div class="metric-value">{-max_dd*100:.1f}%</div>
+                <div>Max Drawdown</div>
+            </div>
             """, unsafe_allow_html=True)
     else:
         st.info("No predictions available.")
         return
 
-    # Rankings
+    # Full rankings table
     st.markdown("---")
     st.subheader("All ETF Rankings")
     if forecasted:
         df = pd.DataFrame([
-            {"ETF": k, "Expected Return (%)": float(v) * 100, "Score": float(scores.get(k, 0))}
+            {
+                "ETF": k,
+                "Expected Return (%)": round(float(v) * 100, 4),
+                "Score": round(float(scores.get(k, 0)), 4),
+            }
             for k, v in forecasted.items()
         ])
-        st.dataframe(df.sort_values("Expected Return (%)", ascending=False),
-                     use_container_width=True, hide_index=True)
+        st.dataframe(
+            df.sort_values("Expected Return (%)", ascending=False),
+            use_container_width=True,
+            hide_index=True,
+        )
 
 
 def main():
     st.title("SDF Engine – ETF Signal Generator")
 
+    col1, col2 = st.columns([6, 1])
+    with col2:
+        if st.button("🔄 Refresh", help="Clear cache and reload signals"):
+            st.cache_data.clear()
+            st.rerun()
+
+    with st.spinner("Loading signals..."):
+        signals = load_signals()
+
     tab1, tab2 = st.tabs(["📈 Equity ETFs", "🏦 FI & Commodities"])
 
     with tab1:
-        render_universe("US Equity ETFs", "equity_results.parquet", "SPY")
+        render_universe(signals.get("equity", {}), "US Equity ETFs")
 
     with tab2:
-        render_universe("Fixed Income & Commodities", "fi_results.parquet", "AGG")
+        render_universe(signals.get("fi_commodity", {}), "Fixed Income & Commodities")
 
     st.markdown(
-        f'<div style="text-align:center; margin-top:2rem; color:#718096;">Last updated: {datetime.now().strftime("%d %b %Y %H:%M")}</div>',
-        unsafe_allow_html=True
+        f'<div style="text-align:center; margin-top:2rem; color:#718096;">'
+        f'Dashboard loaded: {datetime.now().strftime("%d %b %Y %H:%M")}</div>',
+        unsafe_allow_html=True,
     )
 
 
