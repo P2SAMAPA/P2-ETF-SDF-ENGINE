@@ -13,8 +13,8 @@ jobs:
       max-parallel: 2
       fail-fast: false
       matrix:
-        fold: [0, 1, 2, 3]
-        lr: [0.001, 0.01]
+        fold:  [0, 1, 2, 3]
+        lr:    [0.001, 0.01]
         model: ["rf", "xgb"]
     steps:
       - uses: actions/checkout@v4
@@ -30,7 +30,7 @@ jobs:
         run: |
           python train.py \
             --fold ${{ matrix.fold }} \
-            --lr ${{ matrix.lr }} \
+            --lr   ${{ matrix.lr }} \
             --model ${{ matrix.model }}
       - name: Upload artifacts
         if: always()
@@ -40,7 +40,7 @@ jobs:
           path: outputs/
           retention-days: 1
 
-  # Runs once — after ALL matrix training jobs finish successfully
+  # Runs ONCE after ALL 16 matrix jobs finish — no race condition possible
   generate_signals:
     needs: train
     runs-on: ubuntu-latest
