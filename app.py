@@ -9,7 +9,6 @@ from huggingface_hub import hf_hub_download
 
 st.set_page_config(page_title="SDF Engine", layout="wide")
 
-# Clear HF cache so we always get the freshest signal file
 cache_dir = os.path.expanduser("~/.cache/huggingface")
 if os.path.exists(cache_dir):
     shutil.rmtree(cache_dir, ignore_errors=True)
@@ -32,10 +31,6 @@ def get_hf_token():
 
 @st.cache_data(ttl=300)
 def load_signals() -> dict:
-    """
-    Load latest_signals.json written by predict.py.
-    Returns the full payload dict, or empty dict on failure.
-    """
     token = get_hf_token()
     if not token:
         st.error("HF_TOKEN not configured in Streamlit secrets.")
@@ -56,7 +51,6 @@ def load_signals() -> dict:
 
 
 def render_universe(signal: dict, title: str):
-    """Render one universe tab from its signal dict."""
     st.header(title)
     benchmark = signal.get("benchmark", "")
     st.markdown(f"**Benchmark:** {benchmark}")
@@ -66,26 +60,25 @@ def render_universe(signal: dict, title: str):
         return
 
     forecasted = signal.get("forecasted_returns", {})
-    scores = signal.get("scores", {})
+    scores     = signal.get("scores", {})
 
-    sharpe   = float(signal.get("sharpe_ratio",   0))
-    ann_ret  = float(signal.get("annual_return",   0))
-    max_dd   = float(signal.get("max_drawdown",    0))
+    sharpe  = float(signal.get("sharpe_ratio",  0))
+    ann_ret = float(signal.get("annual_return", 0))
+    max_dd  = float(signal.get("max_drawdown",  0))
 
     if not np.isfinite(sharpe):  sharpe  = 0.0
     if not np.isfinite(ann_ret): ann_ret = 0.0
     if not np.isfinite(max_dd):  max_dd  = 0.0
 
-    # Hero — top ETF from forecasted_returns (already scaled to decimal)
     if forecasted:
-        sorted_etfs = sorted(forecasted.items(), key=lambda x: x[1], reverse=True)
-        top, top_ret   = sorted_etfs[0]
-        top_pct        = float(top_ret) * 100
-        sec            = sorted_etfs[1][0] if len(sorted_etfs) > 1 else None
-        sec_pct        = float(forecasted.get(sec, 0)) * 100 if sec else 0
+        sorted_etfs      = sorted(forecasted.items(), key=lambda x: x[1], reverse=True)
+        top, top_ret     = sorted_etfs[0]
+        top_pct          = float(top_ret) * 100
+        sec              = sorted_etfs[1][0] if len(sorted_etfs) > 1 else None
+        sec_pct          = float(forecasted.get(sec, 0)) * 100 if sec else 0
     else:
-        top, top_pct   = "N/A", 0
-        sec, sec_pct   = None, 0
+        top, top_pct     = "N/A", 0
+        sec, sec_pct     = None, 0
 
     signal_date  = signal.get("signal_date", "—")
     generated_at = signal.get("generated_at", "")
@@ -109,8 +102,8 @@ def render_universe(signal: dict, title: str):
                 st.markdown(f"📈 **{sec}** +{sec_pct:.3f}%")
 
             st.caption(f"Generated {generated_at} · "
-                       f"Best config: fold={signal.get('best_fold')} "
-                       f"lr={signal.get('best_lr')} "
+                       f"Best config: fold={signal.get('best_fold')}  "
+                       f"lr={signal.get('best_lr')}  "
                        f"model={signal.get('best_model')}")
 
         with col2:
@@ -132,15 +125,14 @@ def render_universe(signal: dict, title: str):
         st.info("No predictions available.")
         return
 
-    # Full rankings table
     st.markdown("---")
     st.subheader("All ETF Rankings")
     if forecasted:
         df = pd.DataFrame([
             {
-                "ETF": k,
-                "Expected Return (%)": round(float(v) * 100, 4),
-                "Score": round(float(scores.get(k, 0)), 4),
+                "ETF":                  k,
+                "Expected Return (%)":  round(float(v) * 100, 4),
+                "Score":                round(float(scores.get(k, 0)), 4),
             }
             for k, v in forecasted.items()
         ])
