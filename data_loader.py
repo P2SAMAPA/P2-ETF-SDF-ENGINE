@@ -4,12 +4,17 @@
 """
 Loads ETF price data from HuggingFace dataset.
 Dataset: P2SAMAPA/fi-etf-macro-signal-master-data
-Date range: 2008-01-01 to 2026-04-08 (YTD, updated daily)
+Date range: 2008-01-01 to 2026 YTD (updated daily)
+
+FIX: Dataset stores closing prices (e.g. 150.23). All ETF and benchmark
+columns are converted to log returns (ln(P_t / P_{t-1})) before being
+returned. Macro indicator columns are returned as-is since they are
+already in level/rate form (VIX, yield spreads, etc.).
 """
 
 import os
 import pandas as pd
-from datetime import datetime
+import numpy as np
 from typing import Optional, Dict, List
 import warnings
 
@@ -27,12 +32,6 @@ class DataLoader:
     """Load and manage ETF data from HuggingFace."""
 
     def __init__(self, hf_token: Optional[str] = None):
-        """
-        Initialize data loader.
-
-        Args:
-            hf_token: HuggingFace API token (optional, uses HF_TOKEN env var if not provided)
-        """
         self.dataset_name = CONFIG['huggingface']['dataset_source']
         self.hf_token = hf_token or os.getenv(CONFIG['huggingface']['token_env'])
         self._cache = {}
@@ -40,9 +39,9 @@ class DataLoader:
     def load_raw_data(self) -> pd.DataFrame:
         """
         Load raw data from HuggingFace dataset.
-
-        Returns:
-            DataFrame with all ETF columns and date index
+        Returns DataFrame with all columns and date index.
+        Values are stored as closing prices — use the helper methods
+        below which apply the correct transformation per column type.
         """
         if 'raw_data' in self._cache:
             return self._cache['raw_data'].copy()
@@ -81,6 +80,30 @@ class DataLoader:
             print(f"Error loading dataset: {e}")
             raise
 
+    @staticmethod
+    def _prices_to_log_returns(prices: pd.DataFrame) -> pd.DataFrame:
+        """
+        Convert a DataFrame of closing prices to log returns.
+        log_return(t) = ln(P_t / P_{t-1})
+        First row becomes NaN and is dropped.
+        Any inf/-inf (from zero or negative prices) is set to NaN then ffilled.
+        """
+        log_ret = np.log(prices / prices.shift(1))
+        log_ret = log_ret.replace([np.inf, -np.inf], np.nan)
+        log_ret = log_ret.dropna(how='all')          # drop the all-NaN first row
+        log_ret = log_ret.fillna(method='ffill')     # forward-fill any remaining NaNs
+        log_ret = log_ret.fillna(0.0)                # fill any leading NaNs with 0
+        return log_ret
+
+    @staticmethod
+    def _series_prices_to_log_returns(prices: pd.Series) -> pd.Series:
+        """Same as above but for a single Series (benchmark)."""
+        log_ret = np.log(prices / prices.shift(1))
+        log_ret = log_ret.replace([np.inf, -np.inf], np.nan)
+        log_ret = log_ret.dropna()
+        log_ret = log_ret.fillna(0.0)
+        return log_ret
+
     def get_universe_data(
         self,
         assets: List[str],
@@ -88,36 +111,34 @@ class DataLoader:
         end_date: Optional[str] = None
     ) -> pd.DataFrame:
         """
-        Get data for specific asset universe.
-
-        Args:
-            assets: List of asset ticker symbols
-            start_date: Start date (YYYY-MM-DD)
-            end_date: End date (YYYY-MM-DD)
+        Get log returns for a specific asset universe.
+        Prices are converted to log returns before returning.
 
         Returns:
-            DataFrame with specified assets filtered to date range
+            DataFrame of log returns (decimal form, e.g. 0.0082 = 0.82%)
         """
         df = self.load_raw_data()
 
-        # Filter available columns
         available_assets = [col for col in assets if col in df.columns]
         missing = set(assets) - set(available_assets)
         if missing:
             print(f"Warning: Assets not in dataset: {missing}")
 
-        # Filter date range
+        # Convert prices → log returns BEFORE date filtering so we don't
+        # lose the first return at the start of the requested window
+        prices = df[available_assets].copy()
+        returns = self._prices_to_log_returns(prices)
+
+        # Now apply date filter
         if start_date:
-            df = df[df.index >= pd.to_datetime(start_date)]
+            returns = returns[returns.index >= pd.to_datetime(start_date)]
         if end_date:
-            df = df[df.index <= pd.to_datetime(end_date)]
+            returns = returns[returns.index <= pd.to_datetime(end_date)]
 
-        # Return only requested columns
-        result = df[available_assets].copy()
+        print(f"Universe data: {len(available_assets)} assets, {len(returns)} dates  "
+              f"(log returns, mean={returns.mean().mean():.5f})")
 
-        print(f"Universe data: {len(available_assets)} assets, {len(result)} dates")
-
-        return result
+        return returns
 
     def get_macro_data(
         self,
@@ -127,27 +148,19 @@ class DataLoader:
     ) -> pd.DataFrame:
         """
         Get macro indicator data.
-
-        Args:
-            indicators: List of macro indicator names
-            start_date: Start date (YYYY-MM-DD)
-            end_date: End date (YYYY-MM-DD)
-
-        Returns:
-            DataFrame with macro indicators
+        Macro columns (VIX, spreads, yields) are levels/rates — returned as-is,
+        NOT converted to returns, since the VAR uses them as control variables.
         """
         if indicators is None:
             indicators = CONFIG['macro_indicators']
 
         df = self.load_raw_data()
 
-        # Filter available indicators
         available = [col for col in indicators if col in df.columns]
         missing = set(indicators) - set(available)
         if missing:
             print(f"Warning: Macro indicators not in dataset: {missing}")
 
-        # Filter date range
         if start_date:
             df = df[df.index >= pd.to_datetime(start_date)]
         if end_date:
@@ -162,50 +175,34 @@ class DataLoader:
         end_date: Optional[str] = None
     ) -> pd.Series:
         """
-        Get benchmark returns.
-
-        Args:
-            benchmark: Benchmark ticker symbol
-            start_date: Start date (YYYY-MM-DD)
-            end_date: End date (YYYY-MM-DD)
+        Get benchmark log returns.
+        Prices are converted to log returns before returning.
 
         Returns:
-            Series of benchmark returns
+            Series of log returns (decimal form)
         """
         df = self.load_raw_data()
 
         if benchmark not in df.columns:
             raise ValueError(f"Benchmark {benchmark} not in dataset")
 
-        # Filter date range
-        if start_date:
-            df = df[df.index >= pd.to_datetime(start_date)]
-        if end_date:
-            df = df[df.index <= pd.to_datetime(end_date)]
+        # Convert prices → log returns before date filtering
+        log_ret = self._series_prices_to_log_returns(df[benchmark])
 
-        return df[benchmark].copy()
+        if start_date:
+            log_ret = log_ret[log_ret.index >= pd.to_datetime(start_date)]
+        if end_date:
+            log_ret = log_ret[log_ret.index <= pd.to_datetime(end_date)]
+
+        return log_ret
 
     @staticmethod
     def get_us_trading_days(start_date: str, end_date: str) -> pd.DatetimeIndex:
-        """
-        Get US trading day calendar (excludes weekends and major holidays).
-
-        Args:
-            start_date: Start date (YYYY-MM-DD)
-            end_date: End date (YYYY-MM-DD)
-
-        Returns:
-            DatetimeIndex of US trading days
-        """
-        # Generate all calendar days
+        """Get US trading day calendar (excludes weekends and major holidays)."""
         all_days = pd.date_range(start=start_date, end=end_date, freq='D')
-
-        # Remove weekends (5=Saturday, 6=Sunday)
         trading_days = all_days[all_days.dayofweek < 5]
 
-        # Major US market holidays (simplified list)
         holidays = {
-            # New Year's Day
             pd.Timestamp('2008-01-01'), pd.Timestamp('2009-01-01'),
             pd.Timestamp('2010-01-01'), pd.Timestamp('2011-01-01'),
             pd.Timestamp('2012-01-02'), pd.Timestamp('2013-01-01'),
@@ -218,9 +215,7 @@ class DataLoader:
             pd.Timestamp('2026-01-01'),
         }
 
-        trading_days = trading_days.difference(holidays)
-
-        return trading_days
+        return trading_days.difference(holidays)
 
 
 def load_hf_data(
@@ -231,25 +226,12 @@ def load_hf_data(
     end_date: Optional[str] = None,
     hf_token: Optional[str] = None
 ) -> Dict[str, pd.DataFrame]:
-    """
-    Convenience function to load all required data.
-
-    Args:
-        assets: List of asset tickers
-        benchmark: Benchmark ticker
-        macro: List of macro indicators
-        start_date: Start date
-        end_date: End date
-        hf_token: HuggingFace token
-
-    Returns:
-        Dictionary with keys: 'returns', 'benchmark', 'macro'
-    """
+    """Convenience function to load all required data as log returns."""
     loader = DataLoader(hf_token=hf_token)
 
     result = {
         'returns': loader.get_universe_data(assets, start_date, end_date),
-        'macro': loader.get_macro_data(macro, start_date, end_date),
+        'macro':   loader.get_macro_data(macro, start_date, end_date),
     }
 
     if benchmark:
@@ -258,10 +240,15 @@ def load_hf_data(
     return result
 
 
-# Example usage
 if __name__ == "__main__":
-    # Test loading
     loader = DataLoader()
     df = loader.load_raw_data()
     print(f"\nAvailable columns: {list(df.columns)}")
-    print(f"\nSample data:\n{df.head()}")
+    print(f"\nSample raw (prices):\n{df.head()}")
+
+    # Quick sanity check on returns
+    from configs import CONFIG
+    eq_assets = CONFIG['universes']['equity']['assets']
+    returns = loader.get_universe_data(eq_assets, '2024-01-01', '2024-12-31')
+    print(f"\nSample log returns:\n{returns.head()}")
+    print(f"\nReturn stats:\n{returns.describe()}")
