@@ -25,14 +25,13 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-def get_nyse_next_trading_day(base_date_str):
+def get_nyse_previous_trading_day(date_str):
     """
-    Returns the next valid NYSE trading day.
-    If the input date is already a trading day (weekday, not holiday),
-    it returns the same date. Otherwise, it finds the next trading day.
+    Returns the previous valid NYSE trading day before the given date.
+    Used to correct JSON that is one day ahead.
     """
     try:
-        current_dt = pd.to_datetime(base_date_str).normalize()
+        current_dt = pd.to_datetime(date_str).normalize()
     except Exception:
         current_dt = pd.Timestamp.now().normalize()
 
@@ -53,15 +52,11 @@ def get_nyse_next_trading_day(base_date_str):
             return False
         return True
 
-    # If current date is already a trading day, return it
-    if is_trading_day(current_dt):
-        return current_dt.strftime('%Y-%m-%d')
-
-    # Otherwise, move forward day by day
-    next_dt = current_dt + timedelta(days=1)
-    while not is_trading_day(next_dt):
-        next_dt += timedelta(days=1)
-    return next_dt.strftime('%Y-%m-%d')
+    # Move backwards day by day until we find a trading day
+    prev_dt = current_dt - timedelta(days=1)
+    while not is_trading_day(prev_dt):
+        prev_dt -= timedelta(days=1)
+    return prev_dt.strftime('%Y-%m-%d')
 
 def get_hf_token():
     return st.secrets.get("HF_TOKEN") or os.getenv("HF_TOKEN")
@@ -118,21 +113,20 @@ def render_universe(signal: dict, title: str):
 
     raw_date  = signal.get("signal_date", "—")
     
-    # --- DEBUG: show raw and corrected ---
+    # --- CORRECTION: use previous trading day ---
     if raw_date != "—":
         try:
-            corrected_date = get_nyse_next_trading_day(raw_date)
+            corrected_date = get_nyse_previous_trading_day(raw_date)
         except Exception as e:
             corrected_date = raw_date
             st.error(f"Date correction error: {e}")
     else:
         corrected_date = raw_date
 
-    # Display debug info (only for this session)
+    # Debug info (optional, remove after verification)
     with st.expander("🔍 Debug: Date transformation", expanded=False):
         st.markdown(f"**Raw date from JSON:** `{raw_date}`")
-        st.markdown(f"**Corrected date (NYSE):** `{corrected_date}`")
-        st.markdown("If the corrected date is still wrong, the raw date itself may be incorrect. Adjust the correction logic below.")
+        st.markdown(f"**Corrected date (previous trading day):** `{corrected_date}`")
 
     generated_at = signal.get("generated_at", "")
     try:
