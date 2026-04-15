@@ -4,8 +4,9 @@ import numpy as np
 import os
 import json
 import shutil
-from datetime import datetime
+from datetime import datetime, timedelta
 from huggingface_hub import hf_hub_download
+import pandas_market_calendars as mcal  # <-- NEW IMPORT
 
 st.set_page_config(page_title="SDF Engine", layout="wide")
 
@@ -24,10 +25,49 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+nyse = mcal.get_calendar("NYSE")  # <-- NEW CALENDAR
+
+def get_nyse_next_trading_day(base_date_str):
+    """
+    Returns the next valid NYSE trading day.
+    If the input date is already a trading day (weekday, not holiday),
+    it returns the same date. Otherwise, it finds the next trading day.
+    """
+    try:
+        current_dt = pd.to_datetime(base_date_str).normalize()
+    except Exception:
+        current_dt = pd.Timestamp.now(tz='US/Eastern').normalize()
+
+    # Official 2026 NYSE Holiday Schedule (extendable)
+    nyse_holidays = [
+        '2026-01-01', # New Year's Day
+        '2026-01-19', # Martin Luther King, Jr. Day
+        '2026-02-16', # Washington's Birthday
+        '2026-04-03', # Good Friday
+        '2026-05-25', # Memorial Day
+        '2026-06-19', # Juneteenth National Independence Day
+        '2026-07-03', # Independence Day (Observed)
+        '2026-09-07', # Labor Day
+        '2026-11-26', # Thanksgiving Day
+        '2026-12-25'  # Christmas Day
+    ]
+
+    # Check if current date is a valid trading day
+    is_weekday = current_dt.weekday() < 5  # Monday=0, Friday=4
+    is_holiday = current_dt.strftime('%Y-%m-%d') in nyse_holidays
+    if is_weekday and not is_holiday:
+        # Already a trading day – use it directly
+        return current_dt.strftime('%Y-%m-%d')
+
+    # Otherwise, increment to the next business day
+    next_biz_day = current_dt + pd.offsets.BusinessDay(1)
+    while next_biz_day.strftime('%Y-%m-%d') in nyse_holidays:
+        next_biz_day = next_biz_day + pd.offsets.BusinessDay(1)
+
+    return next_biz_day.strftime('%Y-%m-%d')
 
 def get_hf_token():
     return st.secrets.get("HF_TOKEN") or os.getenv("HF_TOKEN")
-
 
 @st.cache_data(ttl=300)
 def load_signals() -> dict:
@@ -48,7 +88,6 @@ def load_signals() -> dict:
     except Exception as e:
         st.error(f"Could not load signals: {e}")
         return {}
-
 
 def render_universe(signal: dict, title: str):
     st.header(title)
@@ -80,7 +119,16 @@ def render_universe(signal: dict, title: str):
         top, top_pct     = "N/A", 0
         sec, sec_pct     = None, 0
 
-    signal_date  = signal.get("signal_date", "—")
+    raw_date  = signal.get("signal_date", "—")
+    # --- APPLY NYSE CORRECTION ---
+    if raw_date != "—":
+        try:
+            corrected_date = get_nyse_next_trading_day(raw_date)
+        except Exception:
+            corrected_date = raw_date
+    else:
+        corrected_date = raw_date
+
     generated_at = signal.get("generated_at", "")
     try:
         generated_at = datetime.fromisoformat(generated_at).strftime("%Y-%m-%d %H:%M UTC")
@@ -94,7 +142,7 @@ def render_universe(signal: dict, title: str):
             <div class="hero-card">
                 <div class="hero-ticker">{top}</div>
                 <div class="hero-return">+{top_pct:.3f}%</div>
-                <div>Expected Return – {signal_date}</div>
+                <div>Expected Return – {corrected_date}</div>
             </div>
             """, unsafe_allow_html=True)
 
@@ -142,7 +190,6 @@ def render_universe(signal: dict, title: str):
             hide_index=True,
         )
 
-
 def main():
     st.title("SDF Engine – ETF Signal Generator")
 
@@ -168,7 +215,6 @@ def main():
         f'Dashboard loaded: {datetime.now().strftime("%d %b %Y %H:%M")}</div>',
         unsafe_allow_html=True,
     )
-
 
 if __name__ == "__main__":
     main()
