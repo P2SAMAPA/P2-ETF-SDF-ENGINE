@@ -21,6 +21,7 @@ st.markdown("""
 .hero-return {font-size: 2rem; font-weight: 600;}
 .metric-card {background: white; border-radius: 12px; padding: 1rem; text-align: center; box-shadow: 0 2px 8px rgba(0,0,0,0.05);}
 .metric-value {font-size: 1.8rem; font-weight: 700; color: #1E3A5F;}
+.debug {background: #f0f0f0; padding: 10px; border-radius: 8px; margin-bottom: 10px; font-family: monospace; font-size: 12px;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -29,7 +30,6 @@ def get_nyse_next_trading_day(base_date_str):
     Returns the next valid NYSE trading day.
     If the input date is already a trading day (weekday, not holiday),
     it returns the same date. Otherwise, it finds the next trading day.
-    Uses only pandas and datetime – no external calendars.
     """
     try:
         current_dt = pd.to_datetime(base_date_str).normalize()
@@ -38,20 +38,16 @@ def get_nyse_next_trading_day(base_date_str):
 
     # NYSE holidays 2025–2027 (extendable)
     nyse_holidays = {
-        # 2025
         '2025-01-01', '2025-01-20', '2025-02-17', '2025-04-18', '2025-05-26',
         '2025-06-19', '2025-07-04', '2025-09-01', '2025-11-27', '2025-12-25',
-        # 2026
         '2026-01-01', '2026-01-19', '2026-02-16', '2026-04-03', '2026-05-25',
         '2026-06-19', '2026-07-03', '2026-09-07', '2026-11-26', '2026-12-25',
-        # 2027
         '2027-01-01', '2027-01-18', '2027-02-15', '2027-03-26', '2027-05-31',
         '2027-06-18', '2027-07-05', '2027-09-06', '2027-11-25', '2027-12-24'
     }
 
-    # Helper to check if a date is a valid trading day
     def is_trading_day(dt):
-        if dt.weekday() >= 5:  # Saturday or Sunday
+        if dt.weekday() >= 5:
             return False
         if dt.strftime('%Y-%m-%d') in nyse_holidays:
             return False
@@ -61,7 +57,7 @@ def get_nyse_next_trading_day(base_date_str):
     if is_trading_day(current_dt):
         return current_dt.strftime('%Y-%m-%d')
 
-    # Otherwise, move forward day by day until we find a trading day
+    # Otherwise, move forward day by day
     next_dt = current_dt + timedelta(days=1)
     while not is_trading_day(next_dt):
         next_dt += timedelta(days=1)
@@ -121,14 +117,22 @@ def render_universe(signal: dict, title: str):
         sec, sec_pct     = None, 0
 
     raw_date  = signal.get("signal_date", "—")
-    # --- APPLY NYSE CORRECTION ---
+    
+    # --- DEBUG: show raw and corrected ---
     if raw_date != "—":
         try:
             corrected_date = get_nyse_next_trading_day(raw_date)
-        except Exception:
+        except Exception as e:
             corrected_date = raw_date
+            st.error(f"Date correction error: {e}")
     else:
         corrected_date = raw_date
+
+    # Display debug info (only for this session)
+    with st.expander("🔍 Debug: Date transformation", expanded=False):
+        st.markdown(f"**Raw date from JSON:** `{raw_date}`")
+        st.markdown(f"**Corrected date (NYSE):** `{corrected_date}`")
+        st.markdown("If the corrected date is still wrong, the raw date itself may be incorrect. Adjust the correction logic below.")
 
     generated_at = signal.get("generated_at", "")
     try:
