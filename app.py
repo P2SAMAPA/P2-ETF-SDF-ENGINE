@@ -6,7 +6,6 @@ import json
 import shutil
 from datetime import datetime, timedelta
 from huggingface_hub import hf_hub_download
-import pandas_market_calendars as mcal  # <-- NEW IMPORT
 
 st.set_page_config(page_title="SDF Engine", layout="wide")
 
@@ -25,46 +24,48 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-nyse = mcal.get_calendar("NYSE")  # <-- NEW CALENDAR
-
 def get_nyse_next_trading_day(base_date_str):
     """
     Returns the next valid NYSE trading day.
     If the input date is already a trading day (weekday, not holiday),
     it returns the same date. Otherwise, it finds the next trading day.
+    Uses only pandas and datetime – no external calendars.
     """
     try:
         current_dt = pd.to_datetime(base_date_str).normalize()
     except Exception:
-        current_dt = pd.Timestamp.now(tz='US/Eastern').normalize()
+        current_dt = pd.Timestamp.now().normalize()
 
-    # Official 2026 NYSE Holiday Schedule (extendable)
-    nyse_holidays = [
-        '2026-01-01', # New Year's Day
-        '2026-01-19', # Martin Luther King, Jr. Day
-        '2026-02-16', # Washington's Birthday
-        '2026-04-03', # Good Friday
-        '2026-05-25', # Memorial Day
-        '2026-06-19', # Juneteenth National Independence Day
-        '2026-07-03', # Independence Day (Observed)
-        '2026-09-07', # Labor Day
-        '2026-11-26', # Thanksgiving Day
-        '2026-12-25'  # Christmas Day
-    ]
+    # NYSE holidays 2025–2027 (extendable)
+    nyse_holidays = {
+        # 2025
+        '2025-01-01', '2025-01-20', '2025-02-17', '2025-04-18', '2025-05-26',
+        '2025-06-19', '2025-07-04', '2025-09-01', '2025-11-27', '2025-12-25',
+        # 2026
+        '2026-01-01', '2026-01-19', '2026-02-16', '2026-04-03', '2026-05-25',
+        '2026-06-19', '2026-07-03', '2026-09-07', '2026-11-26', '2026-12-25',
+        # 2027
+        '2027-01-01', '2027-01-18', '2027-02-15', '2027-03-26', '2027-05-31',
+        '2027-06-18', '2027-07-05', '2027-09-06', '2027-11-25', '2027-12-24'
+    }
 
-    # Check if current date is a valid trading day
-    is_weekday = current_dt.weekday() < 5  # Monday=0, Friday=4
-    is_holiday = current_dt.strftime('%Y-%m-%d') in nyse_holidays
-    if is_weekday and not is_holiday:
-        # Already a trading day – use it directly
+    # Helper to check if a date is a valid trading day
+    def is_trading_day(dt):
+        if dt.weekday() >= 5:  # Saturday or Sunday
+            return False
+        if dt.strftime('%Y-%m-%d') in nyse_holidays:
+            return False
+        return True
+
+    # If current date is already a trading day, return it
+    if is_trading_day(current_dt):
         return current_dt.strftime('%Y-%m-%d')
 
-    # Otherwise, increment to the next business day
-    next_biz_day = current_dt + pd.offsets.BusinessDay(1)
-    while next_biz_day.strftime('%Y-%m-%d') in nyse_holidays:
-        next_biz_day = next_biz_day + pd.offsets.BusinessDay(1)
-
-    return next_biz_day.strftime('%Y-%m-%d')
+    # Otherwise, move forward day by day until we find a trading day
+    next_dt = current_dt + timedelta(days=1)
+    while not is_trading_day(next_dt):
+        next_dt += timedelta(days=1)
+    return next_dt.strftime('%Y-%m-%d')
 
 def get_hf_token():
     return st.secrets.get("HF_TOKEN") or os.getenv("HF_TOKEN")
