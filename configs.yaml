@@ -29,6 +29,9 @@ universes:
       - XLU   # Utilities Select Sector SPDR Fund
       - XME   # SPDR S&P Metals and Mining ETF
       - IWM   # iShares Russell 2000 ETF
+      - IWF
+      - XSD
+      - XBI
       - GDX   # VanEck Gold Miners ETF
     benchmark: SPY  # SPDR S&P 500 ETF Trust (not in universe)
 
