@@ -25,15 +25,17 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-def get_nyse_previous_trading_day(date_str):
+def get_nyse_next_trading_day(date_str=None):
     """
-    Returns the previous valid NYSE trading day before the given date.
-    Used to correct JSON that is one day ahead.
+    Returns the next valid NYSE trading day after the given date (or today if None).
     """
-    try:
-        current_dt = pd.to_datetime(date_str).normalize()
-    except Exception:
+    if date_str is None:
         current_dt = pd.Timestamp.now().normalize()
+    else:
+        try:
+            current_dt = pd.to_datetime(date_str).normalize()
+        except Exception:
+            current_dt = pd.Timestamp.now().normalize()
 
     # NYSE holidays 2025–2027 (extendable)
     nyse_holidays = {
@@ -52,11 +54,11 @@ def get_nyse_previous_trading_day(date_str):
             return False
         return True
 
-    # Move backwards day by day until we find a trading day
-    prev_dt = current_dt - timedelta(days=1)
-    while not is_trading_day(prev_dt):
-        prev_dt -= timedelta(days=1)
-    return prev_dt.strftime('%Y-%m-%d')
+    # Move forward day by day until we find a trading day
+    next_dt = current_dt + timedelta(days=1)
+    while not is_trading_day(next_dt):
+        next_dt += timedelta(days=1)
+    return next_dt.strftime('%Y-%m-%d')
 
 def get_hf_token():
     return st.secrets.get("HF_TOKEN") or os.getenv("HF_TOKEN")
@@ -113,20 +115,15 @@ def render_universe(signal: dict, title: str):
 
     raw_date  = signal.get("signal_date", "—")
     
-    # --- CORRECTION: use previous trading day ---
+    # Use the next trading day for display (prediction target date)
     if raw_date != "—":
         try:
-            corrected_date = get_nyse_previous_trading_day(raw_date)
+            target_date = get_nyse_next_trading_day(raw_date)
         except Exception as e:
-            corrected_date = raw_date
-            st.error(f"Date correction error: {e}")
+            target_date = raw_date
+            st.error(f"Date calculation error: {e}")
     else:
-        corrected_date = raw_date
-
-    # Debug info (optional, remove after verification)
-    with st.expander("🔍 Debug: Date transformation", expanded=False):
-        st.markdown(f"**Raw date from JSON:** `{raw_date}`")
-        st.markdown(f"**Corrected date (previous trading day):** `{corrected_date}`")
+        target_date = get_nyse_next_trading_day()
 
     generated_at = signal.get("generated_at", "")
     try:
@@ -141,7 +138,7 @@ def render_universe(signal: dict, title: str):
             <div class="hero-card">
                 <div class="hero-ticker">{top}</div>
                 <div class="hero-return">+{top_pct:.3f}%</div>
-                <div>Expected Return – {corrected_date}</div>
+                <div>Expected Return – {target_date}</div>
             </div>
             """, unsafe_allow_html=True)
 
